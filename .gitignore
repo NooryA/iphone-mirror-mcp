@@ -10,3 +10,5 @@ native/.build/
 *.swp
 .uv/
 .cursor/
+reports/
+*.log

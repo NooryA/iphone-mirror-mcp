@@ -93,7 +93,9 @@ Keep iPhone Mirroring connected while the agent runs. Quitting the mirroring win
 
 ## Tools
 
-Coordinates are **0–1**, origin **top-left** of the phone content in `mirror_screenshot` (the Mac title bar is already cropped). Do not flip Y.
+Coordinates are **0–1**, origin **top-left** of the phone content in `mirror_screenshot` (the Mac title bar is already cropped; the **iOS status bar is in the image**). Do not flip Y. Nav / account icons are usually around **y = 0.04–0.08**, not 0.12.
+
+Prefer `tap_and_see`, `wait_for_change`, `find_bright`, and `find_color` over sleeping or guessing coordinates. If a result has `iphoneInUse: true`, stop tapping — the phone must be locked to reconnect.
 
 ### `mirror_status`
 
@@ -101,11 +103,11 @@ Whether iPhone Mirroring is running, window bounds, and Accessibility trust.
 
 ### `mirror_screenshot`
 
-PNG of the phone screen. `width` / `height` match the image in points — use this frame for every tap.
+PNG of the phone screen. `width` / `height` are points; `pngWidth` / `pngHeight` are pixels. `iphoneInUse` is true when the window is the “Lock your iPhone to connect” chrome.
 
 ### `tap`
 
-Tap the phone screen.
+Tap the phone screen. Prefer `tap_and_see` when you need to confirm the UI changed.
 
 ```ts
 {
@@ -116,6 +118,28 @@ Tap the phone screen.
 ```
 
 Use `hid` (default). `background` (`CGEvent.postToPid`) does not deliver mouse events to iPhone Mirroring.
+
+### `tap_and_see`
+
+Tap, wait `settle_ms` (default 450), then screenshot. One round-trip instead of tap + sleep + screenshot.
+
+### `wait_for_change`
+
+Poll screenshots until the PNG hash changes or `timeout_ms` (default 8000). Use after a tap that should open a sheet, instead of a blind sleep.
+
+### `find_color` / `find_bright`
+
+Screenshot and return the **0–1 centroid** of matching pixels. Pass a tight region (`x0,y0,x1,y1`) — full-screen `find_bright` will hit titles, not icons.
+
+```ts
+// orange CTA
+{ r: 255, g: 107, b: 53, tolerance?: 40, x0?: 0, y0?: 0.8, x1?: 1, y1?: 1 }
+
+// white account icon, top-right
+{ min_lum?: 200, x0: 0.75, y0: 0.02, x1: 0.98, y1: 0.10 }
+```
+
+Returns `{ found, n, cx, cy, bbox }` (`cx`/`cy` are null when `found` is false).
 
 ### `swipe`
 
@@ -155,10 +179,11 @@ iPhone Mirroring → View menu. `press_home` leaves the current app.
 Typical loop for an agent:
 
 1. `mirror_status` — window is up and Accessibility is trusted
-2. `mirror_screenshot` — map taps from **this** image (0–1)
+2. `mirror_screenshot` — if `iphoneInUse`, stop
 3. `open_app("Safari")` (or your app name) instead of tapping Home icons
-4. `tap` / `swipe` / `type_text`, wait about a second, screenshot again
-5. If the UI did not change, retry the tap once, then try `press_return` if a field is focused
+4. `find_bright` / `find_color` in a tight region, then `tap_and_see` at `cx, cy`
+5. `wait_for_change` when a sheet or navigation should appear — do not sleep 3–5s
+6. If the UI did not change, retry the tap once at the same coords, then try a measured region
 
 Do not call `press_home` unless you intend to leave the app.
 

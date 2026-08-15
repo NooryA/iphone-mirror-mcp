@@ -8,6 +8,7 @@ license = { text = "MIT" }
 authors = [{ name = "NooryA" }]
 dependencies = [
     "mcp>=2.0.0",
+    "pillow>=12.3.0",
 ]
 
 [project.optional-dependencies]

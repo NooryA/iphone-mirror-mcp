@@ -3,26 +3,26 @@ from __future__ import annotations
 import os
 import tempfile
 import time
-from typing import Literal
+from typing import Any, Literal
 
 from mcp.server.mcpserver import Image, MCPServer
 
 from iphone_mirror_mcp.ctl import run_ctl, titlebar_pt
 from iphone_mirror_mcp.geometry import Rect, assert_inside_window, content_rect, normalized_to_global
+from iphone_mirror_mcp.screen import annotate_screenshot, find_pixels
 
 mcp = MCPServer(
     "iphone-mirror",
     instructions=(
         "Drive a physical iPhone through the macOS iPhone Mirroring window. "
         "Coordinates are 0-1, origin top-left of the phone content in the screenshot "
-        "(Mac title bar is already cropped). "
-        "Default tap/swipe/type to hid — iPhone Mirroring ignores postToPid mouse events. "
-        "HID briefly moves the Mac cursor onto the window, then restores it. "
-        "Never flip Y. Never use press_home to open an app (use open_app). "
-        "Always screenshot after a gesture and confirm the iOS UI actually changed "
-        "before the next step. If a tap no-ops, retry once at the same coords, then "
-        "try Spotlight/open_app or press_return. AX clicks on the Mac hosting view "
-        "are not iOS touches."
+        "(Mac title bar is already cropped; the iOS status bar IS in the image — "
+        "nav icons are usually y=0.04–0.08, not 0.12). Never flip Y. "
+        "Default tap/swipe/type to hid. Prefer tap_and_see, wait_for_change, "
+        "find_bright, and find_color over sleeping or guessing coordinates. "
+        "If iphoneInUse is true, stop tapping and tell the user to lock the phone. "
+        "Never use press_home to open an app (use open_app). "
+        "AX clicks on the Mac hosting view are not iOS touches."
     ),
 )
 
@@ -46,6 +46,18 @@ def _map_point(nx: float, ny: float, status: dict) -> tuple[float, float]:
     return px, py
 
 
+def _capture() -> tuple[dict[str, Any], str]:
+    fd, path = tempfile.mkstemp(prefix="iphone-mirror-", suffix=".png")
+    os.close(fd)
+    result = run_ctl("screenshot", "--out", path)
+    annotate_screenshot(result, path)
+    return result, path
+
+
+def _image_payload(result: dict[str, Any], path: str) -> list:
+    return [result, Image(path=path)]
+
+
 @mcp.tool()
 def mirror_status() -> dict:
     """Return whether iPhone Mirroring is running, window bounds, and Accessibility status."""
@@ -54,11 +66,8 @@ def mirror_status() -> dict:
 
 @mcp.tool()
 def mirror_screenshot() -> list:
-    """Capture the phone content (Mac title bar cropped). width/height match the PNG in points."""
-    fd, path = tempfile.mkstemp(prefix="iphone-mirror-", suffix=".png")
-    os.close(fd)
-    result = run_ctl("screenshot", "--out", path)
-    return [result, Image(path=path)]
+    """Capture the phone content (Mac title bar cropped). width/height are points; pngWidth/pngHeight are pixels. iphoneInUse means the lock-to-connect chrome."""
+    return _image_payload(*_capture())
 
 
 @mcp.tool()
@@ -67,10 +76,27 @@ def tap(x: float, y: float, mode: Mode = "hid") -> dict:
 
     Default hid: warp the real cursor, post an NSEvent click, restore the cursor.
     background (postToPid) is ignored by iPhone Mirroring for mouse; do not use it first.
+    Prefer tap_and_see when you need to confirm the UI changed.
     """
     status = run_ctl("status")
     px, py = _map_point(x, y, status)
     return run_ctl("tap", "--x", str(px), "--y", str(py), "--mode", mode)
+
+
+@mcp.tool()
+def tap_and_see(
+    x: float,
+    y: float,
+    mode: Mode = "hid",
+    settle_ms: int = 450,
+) -> list:
+    """Tap, wait settle_ms, then screenshot. Use this instead of tap + sleep + screenshot."""
+    tapped = tap(x, y, mode)
+    time.sleep(max(0, settle_ms) / 1000.0)
+    result, path = _capture()
+    result["tap"] = tapped
+    result["settleMs"] = settle_ms
+    return _image_payload(result, path)
 
 
 @mcp.tool()
@@ -104,6 +130,95 @@ def swipe(
 
 
 @mcp.tool()
+def wait_for_change(
+    timeout_ms: int = 8000,
+    interval_ms: int = 400,
+) -> list:
+    """Poll screenshots until the PNG changes or timeout. Prefer this over sleeping after a tap or while a sheet loads."""
+    baseline, baseline_path = _capture()
+    if baseline.get("iphoneInUse"):
+        baseline["changed"] = False
+        baseline["timedOut"] = False
+        baseline["elapsedMs"] = 0
+        return _image_payload(baseline, baseline_path)
+
+    started = time.monotonic()
+    interval_s = max(50, interval_ms) / 1000.0
+    while True:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        if elapsed_ms >= timeout_ms:
+            result, path = _capture()
+            result["changed"] = result.get("sha256") != baseline.get("sha256")
+            result["timedOut"] = not result["changed"]
+            result["elapsedMs"] = elapsed_ms
+            return _image_payload(result, path)
+        time.sleep(interval_s)
+        result, path = _capture()
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        if result.get("iphoneInUse") or result.get("sha256") != baseline.get("sha256"):
+            result["changed"] = result.get("sha256") != baseline.get("sha256")
+            result["timedOut"] = False
+            result["elapsedMs"] = elapsed_ms
+            return _image_payload(result, path)
+
+
+@mcp.tool()
+def find_color(
+    r: int,
+    g: int,
+    b: int,
+    tolerance: int = 40,
+    x0: float = 0.0,
+    y0: float = 0.0,
+    x1: float = 1.0,
+    y1: float = 1.0,
+    min_pixels: int = 20,
+) -> dict:
+    """Screenshot and return the 0-1 centroid of pixels near (r,g,b). Pass a region (top-right, CTA band) instead of guessing taps."""
+    result, path = _capture()
+    hit = find_pixels(
+        path,
+        red=r,
+        green=g,
+        blue=b,
+        tolerance=tolerance,
+        x0=x0,
+        y0=y0,
+        x1=x1,
+        y1=y1,
+        min_pixels=min_pixels,
+    )
+    hit["iphoneInUse"] = result.get("iphoneInUse")
+    hit["sha256"] = result.get("sha256")
+    return hit
+
+
+@mcp.tool()
+def find_bright(
+    min_lum: int = 200,
+    x0: float = 0.0,
+    y0: float = 0.0,
+    x1: float = 1.0,
+    y1: float = 1.0,
+    min_pixels: int = 20,
+) -> dict:
+    """Screenshot and return the 0-1 centroid of bright pixels. Use a tight region (e.g. top-right 0.75–1.0, 0.02–0.10) for nav icons."""
+    result, path = _capture()
+    hit = find_pixels(
+        path,
+        min_lum=min_lum,
+        x0=x0,
+        y0=y0,
+        x1=x1,
+        y1=y1,
+        min_pixels=min_pixels,
+    )
+    hit["iphoneInUse"] = result.get("iphoneInUse")
+    hit["sha256"] = result.get("sha256")
+    return hit
+
+
+@mcp.tool()
 def type_text(text: str, mode: Mode = "hid") -> dict:
     """Type into the focused iOS field. Prefer ASCII. Newline sends Return (opens Spotlight Top Hit)."""
     return run_ctl("type", "--text", text, "--mode", mode)
@@ -111,7 +226,7 @@ def type_text(text: str, mode: Mode = "hid") -> dict:
 
 @mcp.tool()
 def press_key(name: str, mode: Mode = "hid") -> dict:
-    """Press a named key on the phone: return, escape, tab, delete, space."""
+    """Press a named key on the phone: return, escape, tab, delete, space, up, down, left, right."""
     return run_ctl("key", "--name", name, "--mode", mode)
 
 

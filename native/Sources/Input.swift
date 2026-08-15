@@ -10,8 +10,8 @@ enum InputMode: String {
 
 enum Input {
     private static var mouseEventNumber = 0
-    private static let clickHoldUs: UInt32 = 150_000
-    private static let restoreDelayUs: UInt32 = 400_000
+    private static let clickHoldUs: UInt32 = 180_000
+    private static let restoreDelayUs: UInt32 = 450_000
 
     static func tap(x: Double, y: Double, mode: InputMode) throws -> [String: Any] {
         let win = try WindowFinder.find()
@@ -80,11 +80,15 @@ enum Input {
 
     private static func keyCode(_ name: String) throws -> CGKeyCode {
         switch name.lowercased() {
-        case "return", "enter": return 36
-        case "escape", "esc": return 53
-        case "tab": return 48
-        case "delete", "backspace": return 51
-        case "space": return 49
+            case "return", "enter": return 36
+            case "escape", "esc": return 53
+            case "tab": return 48
+            case "delete", "backspace": return 51
+            case "space": return 49
+            case "down", "downarrow": return 125
+            case "up", "uparrow": return 126
+            case "left", "leftarrow": return 123
+            case "right", "rightarrow": return 124
         default:
             throw MirrorError.invalidArgs("unknown key: \(name)")
         }
@@ -153,10 +157,40 @@ enum Input {
         WindowFinder.warpPoint(fromAppKit: NSEvent.mouseLocation)
     }
 
-    private static func engageHidCursor(at point: CGPoint) -> CGPoint {
-        let saved = saveWarpPoint()
+    /// iPhone Mirroring often ignores warps that appear *inside* the window.
+    /// Cross the frame from outside so ScreenContinuity captures the pointer.
+    private static func approachFromOutside(to point: CGPoint, win: MirrorWindow) {
+        let margin: Double = 36
+        let start: CGPoint
+        if win.x >= margin + 8 {
+            start = CGPoint(x: win.x - margin, y: point.y)
+        } else {
+            start = CGPoint(x: point.x, y: max(8, win.y - margin))
+        }
+        CGWarpMouseCursorPosition(start)
+        usleep(60_000)
+        let steps = 10
+        for i in 1...steps {
+            let t = Double(i) / Double(steps)
+            let p = CGPoint(
+                x: start.x + (point.x - start.x) * t,
+                y: start.y + (point.y - start.y) * t
+            )
+            CGWarpMouseCursorPosition(p)
+            let local = WindowFinder.localPoint(p, in: win)
+            if WindowFinder.contains(win, x: p.x, y: p.y),
+               let moved = hidMouseEvent(.mouseMoved, local: local, windowId: win.windowId) {
+                post(moved, pid: win.pid, hid: true)
+            }
+            usleep(18_000)
+        }
         CGWarpMouseCursorPosition(point)
-        usleep(100_000)
+        usleep(80_000)
+    }
+
+    private static func engageHidCursor(at point: CGPoint, win: MirrorWindow) -> CGPoint {
+        let saved = saveWarpPoint()
+        approachFromOutside(to: point, win: win)
         return saved
     }
 
@@ -165,16 +199,45 @@ enum Input {
         CGWarpMouseCursorPosition(saved)
     }
 
+    /// `cliclick` is what actually reaches iPhone Mirroring on this Mac.
+    /// NSEvent/CGEvent HID clicks often no-op even when the cursor warps.
+    private static func cliclick(at point: CGPoint) -> Bool {
+        let path = "/opt/homebrew/bin/cliclick"
+        guard FileManager.default.isExecutableFile(atPath: path) else { return false }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: path)
+        let x = Int(point.x.rounded())
+        let y = Int(point.y.rounded())
+        proc.arguments = ["-r", "w:80", "m:\(x),\(y)", "w:80", "c:."]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            return proc.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
     private static func postClick(to win: MirrorWindow, at point: CGPoint, hid: Bool) throws -> [String: Any] {
         if hid {
             activate(win.pid)
+            if cliclick(at: point) {
+                let local = WindowFinder.localPoint(point, in: win)
+                return ["localX": local.x, "localY": local.y, "backend": "cliclick"]
+            }
         }
         let local = WindowFinder.localPoint(point, in: win)
         var down: CGEvent?
         var up: CGEvent?
         let saved: CGPoint?
         if hid {
-            saved = engageHidCursor(at: point)
+            saved = engageHidCursor(at: point, win: win)
+            if let moved = hidMouseEvent(.mouseMoved, local: local, windowId: win.windowId) {
+                post(moved, pid: win.pid, hid: true)
+                usleep(40_000)
+            }
             down = hidMouseEvent(.leftMouseDown, local: local, windowId: win.windowId)
             up = hidMouseEvent(.leftMouseUp, local: local, windowId: win.windowId)
         } else {
@@ -195,7 +258,10 @@ enum Input {
         usleep(clickHoldUs)
         post(up, pid: win.pid, hid: hid)
         if hid, let saved {
-            disengageHidCursor(saved)
+            let restore = ProcessInfo.processInfo.environment["MIRROR_HID_RESTORE"] != "0"
+            if restore {
+                disengageHidCursor(saved)
+            }
         }
         return ["localX": local.x, "localY": local.y]
     }
@@ -221,7 +287,7 @@ enum Input {
         }
 
         let first = point(at: 0)
-        let saved = hid ? engageHidCursor(at: first) : nil
+        let saved = hid ? engageHidCursor(at: first, win: win) : nil
         let down: CGEvent?
         if hid {
             down = hidMouseEvent(
