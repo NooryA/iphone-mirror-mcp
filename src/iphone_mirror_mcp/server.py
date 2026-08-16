@@ -18,15 +18,20 @@ mcp = MCPServer(
         "Coordinates are 0-1, origin top-left of the phone content in the screenshot "
         "(Mac title bar is already cropped; the iOS status bar IS in the image — "
         "nav icons are usually y=0.04–0.08, not 0.12). Never flip Y. "
-        "Default tap/swipe/type to hid. Prefer tap_and_see, wait_for_change, "
-        "find_bright, and find_color over sleeping or guessing coordinates. "
+        "Default tap/swipe/type to hid. Prefer tap_label / find_text to click visible "
+        "words (Face ID & Passcode, Subscribe, Confirm). Prefer scroll to move Settings "
+        "lists — swipe/drag does not scroll iPhone Mirroring. Prefer tap_and_see, "
+        "wait_for_change, find_bright, and find_color over sleeping or guessing coordinates. "
+        "Default tap mode is skylight: orange overlay cursor plus a hidden HID warp that "
+        "crosses into the window (~200ms). Continuity ignores SkyLight/postToPid alone. "
+        "Use hid only to debug a visible Mac pointer. "
         "If iphoneInUse is true, stop tapping and tell the user to lock the phone. "
         "Never use press_home to open an app (use open_app). "
         "AX clicks on the Mac hosting view are not iOS touches."
     ),
 )
 
-Mode = Literal["background", "hid"]
+Mode = Literal["background", "hid", "skylight"]
 
 
 def _window_rect(status: dict) -> Rect:
@@ -71,12 +76,13 @@ def mirror_screenshot() -> list:
 
 
 @mcp.tool()
-def tap(x: float, y: float, mode: Mode = "hid") -> dict:
+def tap(x: float, y: float, mode: Mode = "skylight") -> dict:
     """Tap the phone screen. x and y are 0-1, origin top-left of the screenshot / phone content.
 
-    Default hid: warp the real cursor, post an NSEvent click, restore the cursor.
-    background (postToPid) is ignored by iPhone Mirroring for mouse; do not use it first.
-    Prefer tap_and_see when you need to confirm the UI changed.
+    Default skylight: orange overlay cursor; hidden real pointer approaches from
+    outside the window, HID-clicks, then restores. Your Mac pointer stays put.
+    hid: visible cliclick warp (debug). background (postToPid) is ignored by
+    iPhone Mirroring for mouse. Prefer tap_and_see when you need to confirm the UI changed.
     """
     status = run_ctl("status")
     px, py = _map_point(x, y, status)
@@ -87,8 +93,8 @@ def tap(x: float, y: float, mode: Mode = "hid") -> dict:
 def tap_and_see(
     x: float,
     y: float,
-    mode: Mode = "hid",
-    settle_ms: int = 450,
+    mode: Mode = "skylight",
+    settle_ms: int = 300,
 ) -> list:
     """Tap, wait settle_ms, then screenshot. Use this instead of tap + sleep + screenshot."""
     tapped = tap(x, y, mode)
@@ -216,6 +222,96 @@ def find_bright(
     hit["iphoneInUse"] = result.get("iphoneInUse")
     hit["sha256"] = result.get("sha256")
     return hit
+
+
+@mcp.tool()
+def find_text(
+    query: str,
+    x0: float = 0.0,
+    y0: float = 0.0,
+    x1: float = 1.0,
+    y1: float = 1.0,
+    limit: int = 8,
+) -> dict:
+    """Screenshot and OCR. Returns 0-1 centroid of the best match for query (e.g. Face ID & Passcode). No vision-model round-trip."""
+    result, path = _capture()
+    hit = run_ctl(
+        "ocr",
+        "--image",
+        path,
+        "--query",
+        query,
+        "--x0",
+        str(x0),
+        "--y0",
+        str(y0),
+        "--x1",
+        str(x1),
+        "--y1",
+        str(y1),
+        "--limit",
+        str(max(1, min(32, limit))),
+    )
+    hit["iphoneInUse"] = result.get("iphoneInUse")
+    hit["sha256"] = result.get("sha256")
+    return hit
+
+
+@mcp.tool()
+def tap_label(
+    query: str,
+    mode: Mode = "skylight",
+    settle_ms: int = 300,
+    x0: float = 0.0,
+    y0: float = 0.0,
+    x1: float = 1.0,
+    y1: float = 1.0,
+) -> list:
+    """OCR the current screen for query and tap the match. Use this instead of screenshot → guess y → tap."""
+    hit = find_text(query, x0=x0, y0=y0, x1=x1, y1=y1, limit=8)
+    if not hit.get("found") or hit.get("cx") is None or hit.get("cy") is None:
+        result, path = _capture()
+        result["tap"] = {
+            "ok": False,
+            "error": "label not found",
+            "query": query,
+            "matches": hit.get("matches") or [],
+        }
+        result["ocr"] = hit
+        return _image_payload(result, path)
+    seen = tap_and_see(float(hit["cx"]), float(hit["cy"]), mode=mode, settle_ms=settle_ms)
+    if seen and isinstance(seen[0], dict):
+        seen[0]["ocr"] = {
+            "query": query,
+            "text": hit.get("text"),
+            "cx": hit.get("cx"),
+            "cy": hit.get("cy"),
+            "confidence": hit.get("confidence"),
+        }
+    return seen
+
+
+@mcp.tool()
+def scroll(
+    delta: int = -12,
+    ticks: int = 8,
+    x: float = 0.5,
+    y: float = 0.55,
+) -> dict:
+    """Scroll a list under the pointer. Negative delta shows items below (Settings, history). Drag-swipe does not work."""
+    status = run_ctl("status")
+    px, py = _map_point(x, y, status)
+    return run_ctl(
+        "scroll",
+        "--x",
+        str(px),
+        "--y",
+        str(py),
+        "--delta",
+        str(delta),
+        "--ticks",
+        str(ticks),
+    )
 
 
 @mcp.tool()

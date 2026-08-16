@@ -119,6 +119,12 @@ enum WindowFinder {
         return CGPoint(x: ns.x, y: screenH - ns.y)
     }
 
+    /// Inverse of `warpPoint` — overlay windows live in AppKit space.
+    static func appKitPoint(fromWarp p: CGPoint) -> CGPoint {
+        let screenH = NSScreen.main?.frame.height ?? CGDisplayBounds(CGMainDisplayID()).height
+        return CGPoint(x: p.x, y: screenH - p.y)
+    }
+
     static func accessibilityTrusted(prompt: Bool) -> Bool {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary
         return AXIsProcessTrustedWithOptions(options)

@@ -7,7 +7,7 @@ enum MirrorCtl {
         guard let command = args.first else {
             JSONOut.print([
                 "ok": false,
-                "error": "usage: mirror-ctl status|screenshot|tap|swipe|type|key|menu",
+                "error": "usage: mirror-ctl status|screenshot|tap|swipe|scroll|ocr|type|key|menu",
             ])
             exit(2)
         }
@@ -20,11 +20,12 @@ enum MirrorCtl {
                 guard let out = flags["out"] else { throw MirrorError.invalidArgs("screenshot requires --out") }
                 JSONOut.print(try Capture.screenshot(to: out))
             case "tap":
-                let mode = InputMode(rawValue: flags["mode"] ?? "hid") ?? .hid
+                let mode = InputMode(rawValue: flags["mode"] ?? "skylight") ?? .skylight
                 guard let x = double(flags["x"]), let y = double(flags["y"]) else {
                     throw MirrorError.invalidArgs("tap requires --x --y")
                 }
-                JSONOut.print(try Input.tap(x: x, y: y, mode: mode))
+                let overlay = flags["overlay"] != "false"
+                JSONOut.print(try Input.tap(x: x, y: y, mode: mode, overlay: overlay))
             case "swipe":
                 let mode = InputMode(rawValue: flags["mode"] ?? "hid") ?? .hid
                 guard let x1 = double(flags["x1"]), let y1 = double(flags["y1"]),
@@ -33,6 +34,26 @@ enum MirrorCtl {
                 }
                 let duration = Int(flags["duration-ms"] ?? "180") ?? 180
                 JSONOut.print(try Input.swipe(x1: x1, y1: y1, x2: x2, y2: y2, durationMs: duration, mode: mode))
+            case "scroll":
+                guard let x = double(flags["x"]), let y = double(flags["y"]) else {
+                    throw MirrorError.invalidArgs("scroll requires --x --y")
+                }
+                let delta = Int(flags["delta"] ?? "-12") ?? -12
+                let ticks = Int(flags["ticks"] ?? "8") ?? 8
+                JSONOut.print(try Input.scroll(x: x, y: y, delta: delta, ticks: ticks))
+            case "ocr":
+                guard let image = flags["image"] else { throw MirrorError.invalidArgs("ocr requires --image") }
+                JSONOut.print(
+                    try OCR.recognize(
+                        imageAt: image,
+                        query: flags["query"] ?? "",
+                        x0: double(flags["x0"]) ?? 0,
+                        y0: double(flags["y0"]) ?? 0,
+                        x1: double(flags["x1"]) ?? 1,
+                        y1: double(flags["y1"]) ?? 1,
+                        limit: Int(flags["limit"] ?? "8") ?? 8
+                    )
+                )
             case "type":
                 let mode = InputMode(rawValue: flags["mode"] ?? "hid") ?? .hid
                 guard let text = flags["text"] else { throw MirrorError.invalidArgs("type requires --text") }

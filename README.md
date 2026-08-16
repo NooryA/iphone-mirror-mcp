@@ -12,12 +12,12 @@ iPhone Mirroring shows a live video of the phone. The iOS UI is **not** in the M
 2. Maps taps and swipes in **normalized 0–1 coordinates** on that screenshot (origin: top-left of the phone screen)
 3. Forwards those gestures into the mirroring window
 
-Taps use [cliclick](https://github.com/BlueM/cliclick) when it is installed (`hid` mode). That briefly moves the Mac cursor onto the window, then restores it. Keyboard input is HID key events. Home / App Switcher / Spotlight go through iPhone Mirroring’s **View** menu.
+Taps default to `skylight`: an orange overlay cursor, then a **hidden** HID warp that crosses into the window from outside, clicks, and restores (~200ms). Your Mac pointer stays where it was. Pure SkyLight `SLEventPostToPid` does **not** become an iOS touch — Continuity only relays the system pointer while it is inside the window. `hid` still uses a visible [cliclick](https://github.com/BlueM/cliclick) warp for debugging. There is no iOS accessibility tree. Keyboard input is HID key events. Home / App Switcher / Spotlight go through iPhone Mirroring’s **View** menu. List scrolling uses a HID **scroll-wheel** (drag-swipe does not reach iOS).
 
 ```
 Cursor / Claude  ──stdio──►  Python MCP  ──►  dist/mirror-ctl (Swift)
                                                 ├─ ScreenCaptureKit screenshot
-                                                ├─ cliclick / HID tap & swipe
+                                                ├─ overlay + hidden HID tap (default)
                                                 └─ Accessibility View menu
 ```
 
@@ -95,7 +95,7 @@ Keep iPhone Mirroring connected while the agent runs. Quitting the mirroring win
 
 Coordinates are **0–1**, origin **top-left** of the phone content in `mirror_screenshot` (the Mac title bar is already cropped; the **iOS status bar is in the image**). Do not flip Y. Nav / account icons are usually around **y = 0.04–0.08**, not 0.12.
 
-Prefer `tap_and_see`, `wait_for_change`, `find_bright`, and `find_color` over sleeping or guessing coordinates. If a result has `iphoneInUse: true`, stop tapping — the phone must be locked to reconnect.
+Prefer `tap_label`, `find_text`, `scroll`, `tap_and_see`, `wait_for_change`, `find_bright`, and `find_color` over sleeping or guessing coordinates. If a result has `iphoneInUse: true`, stop tapping — the phone must be locked to reconnect.
 
 ### `mirror_status`
 
@@ -113,15 +113,15 @@ Tap the phone screen. Prefer `tap_and_see` when you need to confirm the UI chang
 {
   x: number; // 0–1
   y: number; // 0–1
-  mode?: "hid" | "background"; // default "hid"
+  mode?: "hid" | "background" | "skylight"; // default "skylight"
 }
 ```
 
-Use `hid` (default). `background` (`CGEvent.postToPid`) does not deliver mouse events to iPhone Mirroring.
+Default `skylight` draws an overlay cursor and clicks with a hidden HID warp (live: Account → Your scans in ~200ms, Mac pointer unmoved). `hid` is the older visible cliclick warp. `background` (`CGEvent.postToPid`) does not deliver mouse events to iPhone Mirroring.
 
 ### `tap_and_see`
 
-Tap, wait `settle_ms` (default 450), then screenshot. One round-trip instead of tap + sleep + screenshot.
+Tap, wait `settle_ms` (default 300), then screenshot. One round-trip instead of tap + sleep + screenshot.
 
 ### `wait_for_change`
 
@@ -141,9 +141,29 @@ Screenshot and return the **0–1 centroid** of matching pixels. Pass a tight re
 
 Returns `{ found, n, cx, cy, bbox }` (`cx`/`cy` are null when `found` is false).
 
+### `find_text`
+
+Screenshot + on-device Vision OCR. Returns the 0–1 centroid of the best match. Use this instead of sending the PNG to a vision model.
+
+```ts
+{ query: "Face ID & Passcode", x0?: 0, y0?: 0, x1?: 1, y1?: 1, limit?: 8 }
+```
+
+### `tap_label`
+
+`find_text` then tap the match and screenshot. One round-trip to click a visible row or button.
+
+### `scroll`
+
+HID scroll-wheel over the window. Negative `delta` shows items below. Drag-`swipe` does **not** scroll iOS lists through iPhone Mirroring.
+
+```ts
+{ delta?: -12, ticks?: 8, x?: 0.5, y?: 0.55 }
+```
+
 ### `swipe`
 
-Swipe from `(x1, y1)` to `(x2, y2)` in 0–1 phone-content coordinates.
+Swipe from `(x1, y1)` to `(x2, y2)` in 0–1 phone-content coordinates. Prefer `scroll` for Settings / history lists.
 
 ```ts
 {
@@ -152,7 +172,7 @@ Swipe from `(x1, y1)` to `(x2, y2)` in 0–1 phone-content coordinates.
   x2: number;
   y2: number;
   duration_ms?: number; // default 180
-  mode?: "hid" | "background";
+  mode?: "hid" | "background" | "skylight";
 }
 ```
 
@@ -181,9 +201,10 @@ Typical loop for an agent:
 1. `mirror_status` — window is up and Accessibility is trusted
 2. `mirror_screenshot` — if `iphoneInUse`, stop
 3. `open_app("Safari")` (or your app name) instead of tapping Home icons
-4. `find_bright` / `find_color` in a tight region, then `tap_and_see` at `cx, cy`
-5. `wait_for_change` when a sheet or navigation should appear — do not sleep 3–5s
-6. If the UI did not change, retry the tap once at the same coords, then try a measured region
+4. `find_text` / `tap_label("See monthly plan")` for visible words; `find_bright` / `find_color` only for icons
+5. `scroll` to move Settings / history lists — do not swipe
+6. `wait_for_change` when a sheet or navigation should appear — do not sleep 3–5s
+7. If the UI did not change, retry the tap once at the same coords, then try a measured region
 
 Do not call `press_home` unless you intend to leave the app.
 
