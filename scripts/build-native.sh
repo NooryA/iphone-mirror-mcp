@@ -11,14 +11,17 @@ if [[ -x "$OUT" && -f "$HASH_FILE" && "$(cat "$HASH_FILE")" == "$HASH" ]]; then
   exit 0
 fi
 
-swiftc -O -parse-as-library -o "$OUT" \
+swiftc -O -warnings-as-errors -strict-concurrency=complete -parse-as-library -o "$OUT" \
   "$SRC/Window.swift" \
+  "$SRC/Dependencies.swift" \
+  "$SRC/ActionLock.swift" \
+  "$SRC/ScreenPrecondition.swift" \
   "$SRC/Input.swift" \
-  "$SRC/SkyLight.swift" \
   "$SRC/OverlayCursor.swift" \
   "$SRC/Capture.swift" \
   "$SRC/OCR.swift" \
   "$SRC/Menu.swift" \
+  "$SRC/Diagnostics.swift" \
   "$SRC/main.swift" \
   -framework Cocoa \
   -framework ApplicationServices \

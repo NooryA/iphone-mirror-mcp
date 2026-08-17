@@ -5,6 +5,16 @@ from typing import Any
 
 from PIL import Image
 
+_BLOCKED_TEXT_MARKERS = (
+    ("lock your iphone to connect", "iphone_in_use"),
+    ("iphone in use", "iphone_in_use"),
+    ("icloud signed out", "icloud_signed_out"),
+    ("sign in to icloud to continue", "icloud_signed_out"),
+    ("welcome to iphone mirroring", "setup_required"),
+    ("iphone mirroring not available", "mirroring_unavailable"),
+    ("unable to connect to iphone", "connection_unavailable"),
+)
+
 
 def sha256_file(path: str) -> str:
     digest = hashlib.sha256()
@@ -12,6 +22,24 @@ def sha256_file(path: str) -> str:
         for chunk in iter(lambda: handle.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def visual_hash_file(path: str) -> str:
+    """Return a compact difference hash that ignores insignificant video-frame noise."""
+    with Image.open(path) as image:
+        gray = image.convert("L").resize((9, 8), Image.Resampling.BILINEAR)
+        pixels = list(gray.get_flattened_data())
+    value = 0
+    for row in range(8):
+        offset = row * 9
+        for column in range(8):
+            value = (value << 1) | int(pixels[offset + column] > pixels[offset + column + 1])
+    return f"{value:016x}"
+
+
+def visual_hash_distance(left: str, right: str) -> int:
+    """Return the Hamming distance between two 64-bit visual hashes."""
+    return (int(left, 16) ^ int(right, 16)).bit_count()
 
 
 def png_pixel_size(path: str) -> tuple[int, int]:
@@ -24,20 +52,15 @@ def detect_iphone_in_use(path: str) -> bool:
     with Image.open(path) as image:
         small = image.convert("RGB").resize((64, 128))
         raw = small.tobytes()
-    pixels = [
-        (raw[index], raw[index + 1], raw[index + 2])
-        for index in range(0, len(raw), 3)
-    ]
+    pixels = [(raw[index], raw[index + 1], raw[index + 2]) for index in range(0, len(raw), 3)]
     count = len(pixels)
     if count == 0:
         return False
     lums = [(red + green + blue) / 3.0 for red, green, blue in pixels]
     mean = sum(lums) / count
     variance = sum((value - mean) ** 2 for value in lums) / count
-    stddev = variance ** 0.5
-    saturated = sum(
-        1 for red, green, blue in pixels if max(red, green, blue) - min(red, green, blue) > 50
-    )
+    stddev = variance**0.5
+    saturated = sum(1 for red, green, blue in pixels if max(red, green, blue) - min(red, green, blue) > 50)
     return stddev < 32 and 18 <= mean <= 70 and saturated / count < 0.12
 
 
@@ -46,8 +69,21 @@ def annotate_screenshot(result: dict[str, Any], path: str) -> dict[str, Any]:
     result["pngWidth"] = width
     result["pngHeight"] = height
     result["sha256"] = sha256_file(path)
-    result["iphoneInUse"] = detect_iphone_in_use(path)
+    result["visualHash"] = visual_hash_file(path)
+    result["iphoneInUseHeuristic"] = detect_iphone_in_use(path)
+    result["iphoneInUse"] = False
     return result
+
+
+def blocked_reason_from_ocr(matches: list[dict[str, Any]], *, iphone_in_use: bool) -> str | None:
+    """Classify known host-side blocking screens without confusing ordinary iOS UI."""
+    del iphone_in_use  # Kept for API compatibility; the low-variance heuristic alone is not decisive.
+    combined = " ".join(str(match.get("text") or "") for match in matches)
+    normalized = " ".join(combined.casefold().split())
+    for marker, reason in _BLOCKED_TEXT_MARKERS:
+        if marker in normalized:
+            return reason
+    return None
 
 
 def _in_range(value: int, target: int, tolerance: int) -> bool:
@@ -88,12 +124,15 @@ def find_pixels(
             if min_lum is not None:
                 if (pixel_r + pixel_g + pixel_b) / 3 < min_lum:
                     continue
-            elif red is None or green is None or blue is None:
-                continue
-            elif not (
-                _in_range(pixel_r, red, tolerance)
-                and _in_range(pixel_g, green, tolerance)
-                and _in_range(pixel_b, blue, tolerance)
+            elif (
+                red is None
+                or green is None
+                or blue is None
+                or not (
+                    _in_range(pixel_r, red, tolerance)
+                    and _in_range(pixel_g, green, tolerance)
+                    and _in_range(pixel_b, blue, tolerance)
+                )
             ):
                 continue
             xs.append(left + local_x)

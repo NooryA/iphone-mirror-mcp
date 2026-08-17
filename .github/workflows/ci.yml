@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --all-groups
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: ./scripts/build-native.sh
+      - run: ./dist/mirror-ctl self-test
+      - run: uv run pytest -q --cov=iphone_mirror_mcp --cov-report=term-missing --cov-fail-under=80

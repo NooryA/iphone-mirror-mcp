@@ -1,6 +1,6 @@
 [project]
 name = "iphone-mirror-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server that drives a physical iPhone through the macOS iPhone Mirroring window."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -12,7 +12,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0"]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.12.0",
+]
 
 [project.scripts]
 iphone-mirror-mcp = "iphone_mirror_mcp.server:main"
@@ -24,11 +28,29 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/iphone_mirror_mcp"]
 
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.coverage",
+    "/.pytest_cache",
+    "/.venv",
+    "/dist",
+    "/htmlcov",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
 
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.coverage.run]
+source = ["iphone_mirror_mcp"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.12.0",
 ]

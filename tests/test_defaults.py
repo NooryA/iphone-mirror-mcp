@@ -1,5 +1,5 @@
+import asyncio
 import inspect
-
 from typing import get_args
 
 from iphone_mirror_mcp.server import (
@@ -7,6 +7,7 @@ from iphone_mirror_mcp.server import (
     find_bright,
     find_color,
     find_text,
+    mcp,
     press_key,
     scroll,
     swipe,
@@ -40,3 +41,12 @@ def test_new_tools_have_sane_defaults() -> None:
     assert inspect.signature(find_text).parameters["limit"].default == 8
     assert inspect.signature(scroll).parameters["delta"].default == -12
     assert inspect.signature(tap_label).parameters["settle_ms"].default == 300
+
+
+def test_mcp_tools_advertise_read_only_and_input_risk_hints() -> None:
+    tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+    assert tools["mirror_status"].annotations.read_only_hint is True
+    assert tools["mirror_screenshot"].annotations.open_world_hint is False
+    assert tools["tap"].annotations.read_only_hint is False
+    assert tools["tap"].annotations.destructive_hint is True
+    assert tools["type_text"].annotations.open_world_hint is True

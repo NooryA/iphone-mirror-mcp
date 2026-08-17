@@ -2,7 +2,14 @@ from pathlib import Path
 
 from PIL import Image
 
-from iphone_mirror_mcp.screen import detect_iphone_in_use, find_pixels, sha256_file
+from iphone_mirror_mcp.screen import (
+    blocked_reason_from_ocr,
+    detect_iphone_in_use,
+    find_pixels,
+    sha256_file,
+    visual_hash_distance,
+    visual_hash_file,
+)
 
 
 def _write(path: Path, pixels: list[tuple[int, int, int]], size: tuple[int, int] = (64, 128)) -> None:
@@ -66,3 +73,43 @@ def test_sha256_changes_when_pixels_change(tmp_path: Path) -> None:
     Image.new("RGB", (8, 8), (0, 0, 0)).save(a)
     Image.new("RGB", (8, 8), (1, 0, 0)).save(b)
     assert sha256_file(str(a)) != sha256_file(str(b))
+
+
+def test_visual_hash_ignores_tiny_noise_but_detects_screen_change(tmp_path: Path) -> None:
+    increasing = Image.new("L", (90, 80))
+    increasing.putdata([int(x * 255 / 89) for _y in range(80) for x in range(90)])
+    noisy = increasing.copy()
+    noisy.putpixel((4, 4), min(255, noisy.getpixel((4, 4)) + 1))
+    decreasing = Image.new("L", (90, 80))
+    decreasing.putdata([255 - int(x * 255 / 89) for _y in range(80) for x in range(90)])
+
+    paths = [tmp_path / name for name in ("increasing.png", "noisy.png", "decreasing.png")]
+    for image, path in zip((increasing, noisy, decreasing), paths, strict=True):
+        image.save(path)
+
+    base_hash = visual_hash_file(str(paths[0]))
+    noisy_hash = visual_hash_file(str(paths[1]))
+    changed_hash = visual_hash_file(str(paths[2]))
+    assert base_hash == noisy_hash
+    assert visual_hash_distance(base_hash, changed_hash) == 64
+
+
+def test_visual_iphone_in_use_heuristic_alone_does_not_block() -> None:
+    assert blocked_reason_from_ocr([], iphone_in_use=True) is None
+
+
+def test_ocr_confirms_iphone_in_use() -> None:
+    assert (
+        blocked_reason_from_ocr([{"text": "Lock your iPhone to connect"}], iphone_in_use=True)
+        == "iphone_in_use"
+    )
+
+
+def test_blocked_reason_combines_ocr_lines() -> None:
+    matches = [{"text": "iCloud Signed Out"}, {"text": "Sign in to iCloud to continue."}]
+    assert blocked_reason_from_ocr(matches, iphone_in_use=False) == "icloud_signed_out"
+
+
+def test_ordinary_iphone_ui_is_not_a_host_blocker() -> None:
+    matches = [{"text": "Settings"}, {"text": "Sign in to your iPhone"}]
+    assert blocked_reason_from_ocr(matches, iphone_in_use=False) is None

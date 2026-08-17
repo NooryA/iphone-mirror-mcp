@@ -15,6 +15,25 @@ struct MirrorWindow: Codable {
     var layer: Int
 }
 
+struct DisplayDescriptor {
+    var id: CGDirectDisplayID
+    var frame: CGRect
+    var scale: CGFloat
+    var isPrimary: Bool
+
+    var json: [String: Any] {
+        [
+            "id": id,
+            "x": frame.origin.x,
+            "y": frame.origin.y,
+            "width": frame.width,
+            "height": frame.height,
+            "scale": scale,
+            "isPrimary": isPrimary,
+        ]
+    }
+}
+
 enum MirrorError: Error, CustomStringConvertible {
     case notRunning
     case noWindow
@@ -22,21 +41,24 @@ enum MirrorError: Error, CustomStringConvertible {
     case outsideWindow
     case invalidArgs(String)
     case permission(String)
+    case lockFailed(String)
 
     var description: String {
         switch self {
         case .notRunning:
             return "iPhone Mirroring is not running (com.apple.ScreenContinuity)"
         case .noWindow:
-            return "iPhone Mirroring is running but no on-screen window was found"
-        case .captureFailed(let m):
-            return "screenshot failed: \(m)"
+            return "iPhone Mirroring is running but its phone window is not visible on the current Space"
+        case .captureFailed(let message):
+            return "screenshot failed: \(message)"
         case .outsideWindow:
             return "refusing to click outside the iPhone Mirroring window"
-        case .invalidArgs(let m):
-            return m
-        case .permission(let m):
-            return m
+        case .invalidArgs(let message):
+            return message
+        case .permission(let message):
+            return message
+        case .lockFailed(let message):
+            return "could not serialize input: \(message)"
         }
     }
 }
@@ -44,12 +66,20 @@ enum MirrorError: Error, CustomStringConvertible {
 enum MirrorMetrics {
     static let defaultTitlebar: Double = 52
 
-    static var titlebarPoints: Double {
-        if let raw = ProcessInfo.processInfo.environment["MIRROR_TITLEBAR_PT"],
-           let value = Double(raw) {
-            return max(0, value)
+    static var configuredTitlebarPoints: Double? {
+        guard let raw = ProcessInfo.processInfo.environment["MIRROR_TITLEBAR_PT"],
+              let value = Double(raw), value.isFinite else {
+            return nil
         }
-        return defaultTitlebar
+        return max(0, value)
+    }
+
+    static var titlebarPoints: Double {
+        configuredTitlebarPoints ?? defaultTitlebar
+    }
+
+    static var titlebarSource: String {
+        configuredTitlebarPoints == nil ? "default" : "environment"
     }
 }
 
@@ -63,70 +93,152 @@ enum WindowFinder {
 
     static func find() throws -> MirrorWindow {
         guard let app = app() else { throw MirrorError.notRunning }
-        let pid = app.processIdentifier
-        let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let info = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] else {
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let info = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             throw MirrorError.noWindow
         }
+        guard let found = selectPhoneWindow(from: info, pid: app.processIdentifier, appName: app.localizedName) else {
+            throw MirrorError.noWindow
+        }
+        return found
+    }
 
-        var best: MirrorWindow?
-        var bestArea: Double = 0
-        for w in info {
-            let ownerPid = w[kCGWindowOwnerPID as String] as? pid_t
-            let owner = w[kCGWindowOwnerName as String] as? String ?? ""
-            guard ownerPid == pid || owner == ownerName else { continue }
-            let layer = w[kCGWindowLayer as String] as? Int ?? 0
+    /// Select the actual phone surface, not setup dialogs, menu-bar windows, or overlays.
+    static func selectPhoneWindow(
+        from info: [[String: Any]],
+        pid: pid_t,
+        appName: String?
+    ) -> MirrorWindow? {
+        var candidates: [(window: MirrorWindow, score: Double)] = []
+        let expectedTitles = [ownerName, appName ?? ""].filter { !$0.isEmpty }
+
+        for raw in info {
+            let ownerPid = raw[kCGWindowOwnerPID as String] as? pid_t
+            guard ownerPid == pid else { continue }
+            let layer = raw[kCGWindowLayer as String] as? Int ?? 0
             guard layer == 0 else { continue }
-            let bounds = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+            let bounds = raw[kCGWindowBounds as String] as? [String: Any] ?? [:]
             let x = (bounds["X"] as? NSNumber)?.doubleValue ?? 0
             let y = (bounds["Y"] as? NSNumber)?.doubleValue ?? 0
             let width = (bounds["Width"] as? NSNumber)?.doubleValue ?? 0
             let height = (bounds["Height"] as? NSNumber)?.doubleValue ?? 0
+            guard width >= 150, height >= 150, width.isFinite, height.isFinite else { continue }
+
+            let windowName = raw[kCGWindowName as String] as? String ?? ""
+            let owner = raw[kCGWindowOwnerName as String] as? String ?? ""
+            let windowId = UInt32((raw[kCGWindowNumber as String] as? NSNumber)?.uint32Value ?? 0)
             let area = width * height
-            guard area > bestArea, width > 80, height > 80 else { continue }
-            let wid = UInt32((w[kCGWindowNumber as String] as? NSNumber)?.uint32Value ?? 0)
-            bestArea = area
-            best = MirrorWindow(
-                pid: pid,
-                windowId: wid,
-                x: x,
-                y: y,
-                width: width,
-                height: height,
-                ownerName: owner,
-                windowName: w[kCGWindowName as String] as? String ?? "",
-                layer: layer
-            )
+            let longSide = max(width, height)
+            let shortSide = min(width, height)
+            let elongated = longSide / max(1, shortSide)
+            let exactTitle = expectedTitles.contains {
+                windowName.compare($0, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+            }
+            let setupDialog = windowName.localizedCaseInsensitiveContains("welcome")
+                || windowName.localizedCaseInsensitiveContains("setup")
+
+            var score = min(area, 2_000_000)
+            if exactTitle { score += 10_000_000 }
+            if elongated >= 1.25 { score += 2_000_000 }
+            if windowName.isEmpty { score -= 250_000 }
+            if setupDialog { score -= 5_000_000 }
+
+            candidates.append((
+                MirrorWindow(
+                    pid: pid,
+                    windowId: windowId,
+                    x: x,
+                    y: y,
+                    width: width,
+                    height: height,
+                    ownerName: owner,
+                    windowName: windowName,
+                    layer: layer
+                ),
+                score
+            ))
         }
-        guard let found = best else { throw MirrorError.noWindow }
-        return found
+
+        return candidates.max { left, right in left.score < right.score }?.window
     }
 
-    static func contains(_ win: MirrorWindow, x: Double, y: Double) -> Bool {
-        x >= win.x - 0.5 && x <= win.x + win.width + 0.5
-            && y >= win.y - 0.5 && y <= win.y + win.height + 0.5
+    static func contains(_ window: MirrorWindow, x: Double, y: Double) -> Bool {
+        x.isFinite && y.isFinite
+            && x >= window.x && x < window.x + window.width
+            && y >= window.y && y < window.y + window.height
+    }
+
+    static func contentRect(_ window: MirrorWindow) -> CGRect {
+        let top = min(max(0, MirrorMetrics.titlebarPoints), max(0, window.height - 1))
+        return CGRect(x: window.x, y: window.y + top, width: window.width, height: window.height - top)
     }
 
     /// Window-local AppKit point (origin bottom-left of the window).
-    /// `p` is CGWindowList / CGWarp space (origin top-left of the main display).
-    static func localPoint(_ p: CGPoint, in win: MirrorWindow) -> CGPoint {
-        CGPoint(x: p.x - win.x, y: (win.y + win.height) - p.y)
+    /// `point` is CGWindowList / CGWarp global space (origin top-left of the primary display).
+    static func localPoint(_ point: CGPoint, in window: MirrorWindow) -> CGPoint {
+        CGPoint(x: point.x - window.x, y: (window.y + window.height) - point.y)
     }
 
-    /// Convert `NSEvent.mouseLocation` (AppKit, origin bottom-left) to CGWarp space.
-    static func warpPoint(fromAppKit ns: CGPoint) -> CGPoint {
-        let screenH = NSScreen.main?.frame.height ?? CGDisplayBounds(CGMainDisplayID()).height
-        return CGPoint(x: ns.x, y: screenH - ns.y)
+    private static var primaryDisplayHeight: CGFloat {
+        CGDisplayBounds(CGMainDisplayID()).height
     }
 
-    /// Inverse of `warpPoint` — overlay windows live in AppKit space.
-    static func appKitPoint(fromWarp p: CGPoint) -> CGPoint {
-        let screenH = NSScreen.main?.frame.height ?? CGDisplayBounds(CGMainDisplayID()).height
-        return CGPoint(x: p.x, y: screenH - p.y)
+    /// Convert global AppKit screen coordinates to Quartz display coordinates.
+    static func warpPoint(fromAppKit point: CGPoint) -> CGPoint {
+        CGPoint(x: point.x, y: primaryDisplayHeight - point.y)
+    }
+
+    /// Convert Quartz display coordinates to global AppKit screen coordinates.
+    static func appKitPoint(fromWarp point: CGPoint) -> CGPoint {
+        CGPoint(x: point.x, y: primaryDisplayHeight - point.y)
+    }
+
+    static func appKitRect(for window: MirrorWindow) -> CGRect {
+        CGRect(
+            x: window.x,
+            y: primaryDisplayHeight - CGFloat(window.y + window.height),
+            width: window.width,
+            height: window.height
+        )
+    }
+
+    static func displays() -> [DisplayDescriptor] {
+        NSScreen.screens.compactMap { screen in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return nil
+            }
+            let id = number.uint32Value
+            return DisplayDescriptor(
+                id: id,
+                frame: screen.frame,
+                scale: screen.backingScaleFactor,
+                isPrimary: id == CGMainDisplayID()
+            )
+        }
+    }
+
+    static func display(for window: MirrorWindow) -> DisplayDescriptor? {
+        let windowRect = appKitRect(for: window)
+        return displays().max { left, right in
+            intersectionArea(windowRect, left.frame) < intersectionArea(windowRect, right.frame)
+        }
+    }
+
+    static func backingScale(for window: MirrorWindow) -> CGFloat {
+        display(for: window)?.scale ?? 2
+    }
+
+    private static func intersectionArea(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
+        let intersection = lhs.intersection(rhs)
+        guard !intersection.isNull else { return 0 }
+        return intersection.width * intersection.height
     }
 
     static func accessibilityTrusted(prompt: Bool) -> Bool {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary
+        // The exported C global is annotated mutable and therefore rejected by
+        // Swift 6 strict-concurrency checking. Its documented CFString value is
+        // stable, so construct the same options key without touching that global.
+        let options = ["AXTrustedCheckOptionPrompt": prompt] as CFDictionary
         return AXIsProcessTrustedWithOptions(options)
     }
 }
