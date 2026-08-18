@@ -188,3 +188,61 @@ def test_connection_paused_is_a_host_blocker() -> None:
 def test_ordinary_iphone_ui_is_not_a_host_blocker() -> None:
     matches = [{"text": "Settings"}, {"text": "Sign in to your iPhone"}]
     assert blocked_reason_from_ocr(matches, iphone_in_use=False) is None
+
+
+_MULTI_OBSERVATION_BLOCKERS = (
+    ("lock your iphone to connect", "iphone_in_use"),
+    ("iphone in use", "iphone_in_use"),
+    ("icloud signed out", "icloud_signed_out"),
+    ("sign in to icloud to continue", "icloud_signed_out"),
+    ("welcome to iphone mirroring", "setup_required"),
+    ("iphone mirroring not available", "mirroring_unavailable"),
+    ("unable to connect to iphone", "connection_unavailable"),
+    ("connection paused", "connection_paused"),
+)
+
+
+def _ocr_box(text: str, x0: float, y0: float, x1: float, y1: float) -> dict[str, object]:
+    return {"text": text, "bbox": {"x0": x0, "y0": y0, "x1": x1, "y1": y1}}
+
+
+@pytest.mark.parametrize(("marker", "reason"), _MULTI_OBSERVATION_BLOCKERS)
+def test_blocked_reason_accepts_single_adjacent_and_line_wrapped_phrases(marker: str, reason: str) -> None:
+    first, remainder = marker.split(" ", 1)
+    single = [{"text": marker}]
+    adjacent = [
+        _ocr_box(first, 0.10, 0.20, 0.16, 0.24),
+        _ocr_box(remainder, 0.17, 0.20, 0.78, 0.24),
+    ]
+    line_wrapped = [
+        _ocr_box(first, 0.15, 0.20, 0.55, 0.24),
+        _ocr_box(remainder, 0.16, 0.25, 0.80, 0.29),
+    ]
+
+    assert blocked_reason_from_ocr(single, iphone_in_use=False) == reason
+    assert blocked_reason_from_ocr(adjacent, iphone_in_use=False) == reason
+    assert blocked_reason_from_ocr(line_wrapped, iphone_in_use=False) == reason
+
+
+@pytest.mark.parametrize(("marker", "_reason"), _MULTI_OBSERVATION_BLOCKERS)
+def test_blocked_reason_rejects_unrelated_phrase_fragments(marker: str, _reason: str) -> None:
+    first, remainder = marker.split(" ", 1)
+    distant = [
+        _ocr_box(first, 0.10, 0.20, 0.16, 0.24),
+        _ocr_box(remainder, 0.70, 0.20, 0.95, 0.24),
+    ]
+    reversed_order = [
+        _ocr_box(first, 0.60, 0.20, 0.68, 0.24),
+        _ocr_box(remainder, 0.10, 0.20, 0.50, 0.24),
+    ]
+    intervening = [
+        _ocr_box(first, 0.10, 0.20, 0.16, 0.24),
+        _ocr_box("Unrelated", 0.17, 0.20, 0.28, 0.24),
+        _ocr_box(remainder, 0.29, 0.20, 0.80, 0.24),
+    ]
+    unpositioned = [{"text": first}, {"text": remainder}]
+
+    assert blocked_reason_from_ocr(distant, iphone_in_use=False) is None
+    assert blocked_reason_from_ocr(reversed_order, iphone_in_use=False) is None
+    assert blocked_reason_from_ocr(intervening, iphone_in_use=False) is None
+    assert blocked_reason_from_ocr(unpositioned, iphone_in_use=False) is None

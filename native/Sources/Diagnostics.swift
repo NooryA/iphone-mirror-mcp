@@ -298,6 +298,61 @@ enum Diagnostics {
             ["text": "Connection Paused"],
             ["text": "Resume"],
         ]) == "connection_paused"
+        let blockerCases = [
+            ("lock your iphone to connect", "iphone_in_use"),
+            ("iphone in use", "iphone_in_use"),
+            ("icloud signed out", "icloud_signed_out"),
+            ("sign in to icloud to continue", "icloud_signed_out"),
+            ("welcome to iphone mirroring", "setup_required"),
+            ("iphone mirroring not available", "mirroring_unavailable"),
+            ("unable to connect to iphone", "connection_unavailable"),
+            ("connection paused", "connection_paused"),
+        ]
+        func textBox(
+            _ text: String,
+            _ x0: Double,
+            _ y0: Double,
+            _ x1: Double,
+            _ y1: Double
+        ) -> [String: Any] {
+            [
+                "text": text,
+                "bbox": ["x0": x0, "y0": y0, "x1": x1, "y1": y1],
+            ]
+        }
+        let hostBlockerGeometryPassed = blockerCases.allSatisfy { marker, reason in
+            let words = marker.split(separator: " ").map(String.init)
+            let first = words[0]
+            let remainder = words.dropFirst().joined(separator: " ")
+            let single = ScreenPrecondition.blockedReason(from: [["text": marker]]) == reason
+            let adjacent = ScreenPrecondition.blockedReason(from: [
+                textBox(first, 0.10, 0.20, 0.16, 0.24),
+                textBox(remainder, 0.17, 0.20, 0.78, 0.24),
+            ]) == reason
+            let lineWrapped = ScreenPrecondition.blockedReason(from: [
+                textBox(first, 0.15, 0.20, 0.55, 0.24),
+                textBox(remainder, 0.16, 0.25, 0.80, 0.29),
+            ]) == reason
+            let distant = ScreenPrecondition.blockedReason(from: [
+                textBox(first, 0.10, 0.20, 0.16, 0.24),
+                textBox(remainder, 0.70, 0.20, 0.95, 0.24),
+            ]) == nil
+            let reversed = ScreenPrecondition.blockedReason(from: [
+                textBox(first, 0.60, 0.20, 0.68, 0.24),
+                textBox(remainder, 0.10, 0.20, 0.50, 0.24),
+            ]) == nil
+            let intervening = ScreenPrecondition.blockedReason(from: [
+                textBox(first, 0.10, 0.20, 0.16, 0.24),
+                textBox("Unrelated", 0.17, 0.20, 0.28, 0.24),
+                textBox(remainder, 0.29, 0.20, 0.80, 0.24),
+            ]) == nil
+            let unpositioned = ScreenPrecondition.blockedReason(from: [
+                ["text": first],
+                ["text": remainder],
+            ]) == nil
+            return single && adjacent && lineWrapped && distant && reversed
+                && intervening && unpositioned
+        }
         let hostBlockerFallbackTriggerPassed = ScreenPrecondition.needsAccurateBlockerVerification(from: [
             ["text": "ConnectbJn"],
         ]) && !ScreenPrecondition.needsAccurateBlockerVerification(from: [
@@ -363,7 +418,8 @@ enum Diagnostics {
                 && spotlightSelectionPassed && spotlightEntryPassed
                 && normalizedRemapPassed && preparedWindowIdentityPassed
                 && timeoutIsolationPassed && windowCaptureFallbackPassed
-                && hostBlockerPassed && hostBlockerFallbackTriggerPassed && ocrTwoPassEvidencePassed,
+                && hostBlockerPassed && hostBlockerGeometryPassed
+                && hostBlockerFallbackTriggerPassed && ocrTwoPassEvidencePassed,
             "windowSelection": selectionPassed,
             "coordinateRoundTrip": coordinatesPassed,
             "cliclickNegativeCoordinates": cliclickCoordinatesPassed,
@@ -389,6 +445,7 @@ enum Diagnostics {
             "captureTimeoutIsolation": timeoutIsolationPassed,
             "windowOnlyCaptureFallback": windowCaptureFallbackPassed,
             "hostBlockerDetection": hostBlockerPassed,
+            "hostBlockerGeometryGrouping": hostBlockerGeometryPassed,
             "hostBlockerFallbackTrigger": hostBlockerFallbackTriggerPassed,
             "ocrTwoPassEvidence": ocrTwoPassEvidencePassed,
             "selectedWindowId": selected.map { Int($0.windowId) } ?? -1,
