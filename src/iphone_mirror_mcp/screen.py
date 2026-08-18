@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 from typing import Any
 
 from PIL import Image
@@ -31,8 +32,12 @@ def sha256_file(path: str) -> str:
 def visual_hash_file(path: str) -> str:
     """Return a compact difference hash that ignores insignificant video-frame noise."""
     with Image.open(path) as image:
-        gray = image.convert("L").resize((9, 8), Image.Resampling.BILINEAR)
-        pixels = list(gray.get_flattened_data())
+        return _visual_hash_image(image)
+
+
+def _visual_hash_image(image: Image.Image) -> str:
+    gray = image.convert("L").resize((9, 8), Image.Resampling.BILINEAR)
+    pixels = list(gray.get_flattened_data())
     value = 0
     for row in range(8):
         offset = row * 9
@@ -49,15 +54,19 @@ def visual_hash_distance(left: str, right: str) -> int:
 def visual_signature_file(path: str) -> str:
     """Sample absolute RGB values so flat/color-only transitions remain visible."""
     with Image.open(path) as image:
-        rgb = image.convert("RGB")
-        width, height = rgb.size
-        pixels = rgb.load()
-        samples = bytearray()
-        for row in range(VISUAL_SIGNATURE_SIZE):
-            y = min(height - 1, int((row + 0.5) * height / VISUAL_SIGNATURE_SIZE))
-            for column in range(VISUAL_SIGNATURE_SIZE):
-                x = min(width - 1, int((column + 0.5) * width / VISUAL_SIGNATURE_SIZE))
-                samples.extend(pixels[x, y])
+        return _visual_signature_image(image)
+
+
+def _visual_signature_image(image: Image.Image) -> str:
+    rgb = image.convert("RGB")
+    width, height = rgb.size
+    pixels = rgb.load()
+    samples = bytearray()
+    for row in range(VISUAL_SIGNATURE_SIZE):
+        y = min(height - 1, int((row + 0.5) * height / VISUAL_SIGNATURE_SIZE))
+        for column in range(VISUAL_SIGNATURE_SIZE):
+            x = min(width - 1, int((column + 0.5) * width / VISUAL_SIGNATURE_SIZE))
+            samples.extend(pixels[x, y])
     return f"{VISUAL_SIGNATURE_VERSION}:{samples.hex()}"
 
 
@@ -85,8 +94,12 @@ def png_pixel_size(path: str) -> tuple[int, int]:
 def detect_iphone_in_use(path: str) -> bool:
     """True when the mirror window is the 'iPhone in Use / Lock your iPhone' chrome."""
     with Image.open(path) as image:
-        small = image.convert("RGB").resize((64, 128))
-        raw = small.tobytes()
+        return _detect_iphone_in_use_image(image)
+
+
+def _detect_iphone_in_use_image(image: Image.Image) -> bool:
+    small = image.convert("RGB").resize((64, 128))
+    raw = small.tobytes()
     pixels = [(raw[index], raw[index + 1], raw[index + 2]) for index in range(0, len(raw), 3)]
     count = len(pixels)
     if count == 0:
@@ -100,14 +113,21 @@ def detect_iphone_in_use(path: str) -> bool:
 
 
 def annotate_screenshot(result: dict[str, Any], path: str) -> dict[str, Any]:
-    width, height = png_pixel_size(path)
+    with open(path, "rb") as handle:
+        png = handle.read()
+    with Image.open(io.BytesIO(png)) as image:
+        image.load()
+        width, height = image.size
+        visual_hash = _visual_hash_image(image)
+        visual_signature = _visual_signature_image(image)
+        iphone_in_use_heuristic = _detect_iphone_in_use_image(image)
     result["pngWidth"] = width
     result["pngHeight"] = height
-    result["sha256"] = sha256_file(path)
-    result["visualHash"] = visual_hash_file(path)
-    result["visualSignature"] = visual_signature_file(path)
-    result["iphoneInUseHeuristic"] = detect_iphone_in_use(path)
-    result["iphoneInUse"] = False
+    result["sha256"] = hashlib.sha256(png).hexdigest()
+    result["visualHash"] = visual_hash
+    result["visualSignature"] = visual_signature
+    result["iphoneInUseHeuristic"] = iphone_in_use_heuristic
+    result.setdefault("iphoneInUse", False)
     return result
 
 

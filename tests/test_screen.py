@@ -4,6 +4,7 @@ import pytest
 from PIL import Image
 
 from iphone_mirror_mcp.screen import (
+    annotate_screenshot,
     blocked_reason_from_ocr,
     detect_iphone_in_use,
     find_pixels,
@@ -76,6 +77,19 @@ def test_sha256_changes_when_pixels_change(tmp_path: Path) -> None:
     Image.new("RGB", (8, 8), (0, 0, 0)).save(a)
     Image.new("RGB", (8, 8), (1, 0, 0)).save(b)
     assert sha256_file(str(a)) != sha256_file(str(b))
+
+
+def test_annotation_preserves_native_host_state(tmp_path: Path) -> None:
+    path = tmp_path / "blocked.png"
+    Image.new("RGB", (32, 64), (20, 40, 60)).save(path)
+    result = {"iphoneInUse": True, "interactionBlocked": True, "blockedReason": "iphone_in_use"}
+
+    annotate_screenshot(result, str(path))
+
+    assert result["iphoneInUse"] is True
+    assert result["interactionBlocked"] is True
+    assert result["blockedReason"] == "iphone_in_use"
+    assert result["sha256"] == sha256_file(str(path))
 
 
 def test_visual_hash_ignores_tiny_noise_but_detects_screen_change(tmp_path: Path) -> None:

@@ -23,6 +23,24 @@ Codex / Cursor / Claude  ──stdio──►  Python MCP  ──►  mirror-ctl
                                                 └─ Accessibility View menu
 ```
 
+## Performance
+
+The server keeps safety checks in the action path, but avoids duplicate native launches, captures, image decodes,
+and OCR passes. On the development Mac with a live physical iPhone, warm median MCP timings were:
+
+| Operation | 0.2.0 | 0.3.0 |
+| --- | ---: | ---: |
+| `mirror_status` | 98 ms | 93 ms |
+| `mirror_screenshot` | 671 ms | 295 ms |
+| `find_text` common hit | 1002 ms | 302 ms |
+| `tap_label` missing label (no input sent) | 1180 ms | 665 ms |
+
+Successful taps are normally about 1.0–1.4 seconds end to end because they still activate and verify the exact
+window, accurately OCR the preflight frame, send input, and capture proof of the resulting screen. The adaptive
+settlement loop usually sees an ordinary transition in about 180–200 ms instead of always sleeping for its full
+one-second default. The first installed-wheel call is slower because it compiles and signs the native helper once.
+Hardware, display scale, animation length, OCR content, and macOS focus state affect absolute timings.
+
 ## Prerequisites
 
 - macOS with [iPhone Mirroring](https://support.apple.com/guide/iphone/use-iphone-mirroring-iph373c7c223/ios) (Sequoia or later)
@@ -53,7 +71,7 @@ still required.
 
 ```bash
 uv build
-uv tool install dist/iphone_mirror_mcp-0.2.0-py3-none-any.whl
+uv tool install dist/iphone_mirror_mcp-0.3.0-py3-none-any.whl
 iphone-mirror-mcp
 ```
 
@@ -160,7 +178,7 @@ Screenshots include both a difference-based `visualHash` and a versioned absolut
 
 ### `tap_and_see`
 
-Tap, wait `settle_ms` (default 300), then screenshot. The native helper keeps one cross-process input lock across preflight, fresh normalized-coordinate mapping, the tap, settlement, and result capture.
+Tap, adaptively wait for a material screen change for at most `settle_ms` (default 1000), then return the captured result. Most transitions finish much earlier than the maximum. The native helper keeps one cross-process input lock across preflight, fresh normalized-coordinate mapping, the tap, settlement, and result capture. Results include `screenChanged`, `visualDistanceFromPreflight`, `settledMs`, `settlementCaptures`, and `maximumSettleMs` so callers can verify the transition instead of guessing with a sleep.
 
 ### `wait_for_change`
 
@@ -182,7 +200,7 @@ Returns `{ found, n, cx, cy, bbox }` (`cx`/`cy` are null when `found` is false).
 
 ### `find_text`
 
-Screenshot + on-device Vision OCR. Returns the 0–1 centroid of the best match. Use this instead of sending the PNG to a vision model.
+Screenshot + on-device Vision OCR. Capture and OCR run together in one native process and use fast recognition first, with accurate recognition only when the requested label is missed. Returns the 0–1 centroid of the best match. Use this instead of sending the PNG to a vision model.
 
 ```ts
 { query: "Face ID & Passcode", x0?: 0, y0?: 0, x1?: 1, y1?: 1, limit?: 8 }
@@ -190,7 +208,7 @@ Screenshot + on-device Vision OCR. Returns the 0–1 centroid of the best match.
 
 ### `tap_label`
 
-Freshly capture and OCR the query, derive its normalized point, tap it, and return the resulting screenshot. The entire operation runs under one native input lock, so a coordinate selected before the lock is never trusted.
+Freshly capture and accurately OCR the query, derive its normalized point, tap it, adaptively settle, and return the resulting screenshot. The accurate OCR observations used by the safety preflight are reused for target selection rather than scanning the same frame twice. The entire operation runs under one native input lock, so a coordinate selected before the lock is never trusted.
 
 ### `scroll`
 

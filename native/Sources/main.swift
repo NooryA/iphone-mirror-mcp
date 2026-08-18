@@ -12,6 +12,7 @@ enum MirrorCtl {
         "doctor": [],
         "self-test": [],
         "screenshot": ["out"],
+        "capture-analyze": ["out", "query", "x0", "y0", "x1", "y1", "limit"],
         "tap": ["x", "y", "mode", "overlay", "expected-sha256", "expected-image"],
         "tap-normalized": ["x", "y", "mode", "overlay", "expected-sha256", "expected-image"],
         "tap-and-capture": [
@@ -36,7 +37,7 @@ enum MirrorCtl {
         guard let command = args.first else {
             JSONOut.print([
                 "ok": false,
-                "error": "usage: mirror-ctl status|doctor|self-test|screenshot|tap-normalized|tap-and-capture|tap-label-and-capture|swipe|scroll-normalized|ocr|type|key|menu|open-app",
+                "error": "usage: mirror-ctl status|doctor|self-test|screenshot|capture-analyze|tap-normalized|tap-and-capture|tap-label-and-capture|swipe|scroll-normalized|ocr|type|key|menu|open-app",
             ])
             exit(2)
         }
@@ -96,7 +97,7 @@ enum MirrorCtl {
                 }
                 _ = try strictInt(
                     flags["settle-ms"],
-                    default: 300,
+                    default: 1_000,
                     minimum: 0,
                     maximum: 10_000,
                     name: "settle-ms"
@@ -126,7 +127,7 @@ enum MirrorCtl {
             _ = try strictInt(flags["limit"], default: 8, minimum: 1, maximum: 32, name: "limit")
             _ = try strictInt(
                 flags["settle-ms"],
-                default: 300,
+                default: 1_000,
                 minimum: 0,
                 maximum: 10_000,
                 name: "settle-ms"
@@ -203,6 +204,8 @@ enum MirrorCtl {
                 throw MirrorError.invalidArgs("screenshot requires --out")
             }
             return try Capture.screenshot(to: out)
+        case "capture-analyze":
+            return try captureAndAnalyze(flags: flags)
         case "tap":
             let preflight = try requiredPreflight(preflight, command: command)
             let inputMode = try mode(flags["mode"], default: .skylight)
@@ -239,7 +242,7 @@ enum MirrorCtl {
                 throw MirrorError.invalidArgs("tap-and-capture requires finite --x --y and --out")
             }
             let overlay = flags["overlay"] != "false"
-            let settle = boundedInt(flags["settle-ms"], default: 300, minimum: 0, maximum: 10_000)
+            let settle = boundedInt(flags["settle-ms"], default: 1_000, minimum: 0, maximum: 10_000)
             let tap = try Input.tapNormalized(
                 x: x,
                 y: y,
@@ -247,10 +250,15 @@ enum MirrorCtl {
                 overlay: overlay,
                 preparedWindow: preflight.window
             )
-            if settle > 0 { usleep(useconds_t(settle * 1_000)) }
-            var capture = try Capture.screenshot(window: preflight.window, to: output)
+            var capture = try captureAfterAction(
+                window: preflight.window,
+                output: output,
+                preflight: preflight,
+                maximumSettleMs: settle
+            )
+            try appendInteractionState(to: &capture, imageAt: output)
             capture["tap"] = tap
-            capture["settleMs"] = settle
+            capture["maximumSettleMs"] = settle
             return capture
         case "tap-label-and-capture":
             guard let preflight else {
@@ -577,6 +585,117 @@ enum MirrorCtl {
         ]
     }
 
+    private static func captureAndAnalyze(flags: [String: String]) throws -> [String: Any] {
+        guard let output = flags["out"] else {
+            throw MirrorError.invalidArgs("capture-analyze requires --out")
+        }
+        let x0 = try strictDouble(flags["x0"], default: 0, minimum: 0, maximum: 1, name: "x0")
+        let y0 = try strictDouble(flags["y0"], default: 0, minimum: 0, maximum: 1, name: "y0")
+        let x1 = try strictDouble(flags["x1"], default: 1, minimum: 0, maximum: 1, name: "x1")
+        let y1 = try strictDouble(flags["y1"], default: 1, minimum: 0, maximum: 1, name: "y1")
+        guard x0 < x1, y0 < y1 else {
+            throw MirrorError.invalidArgs("capture analysis region must satisfy x0 < x1 and y0 < y1")
+        }
+        let limit = try strictInt(flags["limit"], default: 8, minimum: 1, maximum: 32, name: "limit")
+        if let query = flags["query"], query.count > 500 {
+            throw MirrorError.invalidArgs("capture analysis query must be at most 500 characters")
+        }
+
+        var result = try Capture.screenshot(to: output)
+        var matches = try OCR.scan(imageAt: output, recognitionLevel: .fast)
+        var recognitionLevel = "fast"
+        if let query = flags["query"] {
+            var ocr = OCR.search(
+                matches: matches,
+                query: query,
+                x0: x0,
+                y0: y0,
+                x1: x1,
+                y1: y1,
+                limit: limit
+            )
+            if ocr["found"] as? Bool != true {
+                matches = try OCR.scan(imageAt: output, recognitionLevel: .accurate)
+                recognitionLevel = "accurate-fallback"
+                ocr = OCR.search(
+                    matches: matches,
+                    query: query,
+                    x0: x0,
+                    y0: y0,
+                    x1: x1,
+                    y1: y1,
+                    limit: limit
+                )
+            }
+            result["ocr"] = ocr
+        }
+        appendInteractionState(to: &result, matches: matches)
+        result["analysisRecognitionLevel"] = recognitionLevel
+        return result
+    }
+
+    private static func appendInteractionState(
+        to result: inout [String: Any],
+        imageAt path: String
+    ) throws {
+        appendInteractionState(
+            to: &result,
+            matches: try OCR.scan(imageAt: path, recognitionLevel: .fast)
+        )
+        result["analysisRecognitionLevel"] = "fast"
+    }
+
+    private static func appendInteractionState(
+        to result: inout [String: Any],
+        matches: [[String: Any]]
+    ) {
+        let blockedReason = ScreenPrecondition.blockedReason(from: matches)
+        result["iphoneInUse"] = blockedReason == "iphone_in_use"
+        result["interactionBlocked"] = blockedReason != nil
+        result["blockedReason"] = blockedReason as Any? ?? NSNull()
+    }
+
+    private static func captureAfterAction(
+        window: MirrorWindow,
+        output: String,
+        preflight: ScreenPreconditionState,
+        maximumSettleMs: Int
+    ) throws -> [String: Any] {
+        let started = DispatchTime.now().uptimeNanoseconds
+        let maximum = max(0, maximumSettleMs)
+        if maximum > 0 { usleep(useconds_t(min(80, maximum) * 1_000)) }
+        var attempts = 0
+        while true {
+            var result = try Capture.screenshot(window: window, to: output)
+            attempts += 1
+            let currentSignature = try VisualComparison.signature(at: URL(fileURLWithPath: output))
+            let distance = try VisualComparison.distance(preflight.visualSignature, currentSignature)
+            let elapsedMs = Int((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
+            let changed = distance > VisualComparison.materialDifferenceThreshold
+            if shouldFinishSettlement(
+                visualDistance: distance,
+                elapsedMs: elapsedMs,
+                maximumSettleMs: maximum
+            ) {
+                result["visualDistanceFromPreflight"] = distance
+                result["screenChanged"] = changed
+                result["settledMs"] = elapsedMs
+                result["settlementCaptures"] = attempts
+                return result
+            }
+            usleep(useconds_t(min(80, maximum - elapsedMs) * 1_000))
+        }
+    }
+
+    static func shouldFinishSettlement(
+        visualDistance: Double,
+        elapsedMs: Int,
+        maximumSettleMs: Int
+    ) -> Bool {
+        visualDistance > VisualComparison.materialDifferenceThreshold
+            || elapsedMs >= max(0, maximumSettleMs)
+    }
+
     private static func tapLabelAndCapture(
         flags: [String: String],
         preflight: ScreenPreconditionState
@@ -586,14 +705,9 @@ enum MirrorCtl {
         }
         let inputMode = try mode(flags["mode"], default: .skylight)
         let overlay = flags["overlay"] != "false"
-        let settle = boundedInt(flags["settle-ms"], default: 300, minimum: 0, maximum: 10_000)
-        let source = FileManager.default.temporaryDirectory
-            .appendingPathComponent("iphone-mirror-label-source-\(UUID().uuidString).png")
-        defer { try? FileManager.default.removeItem(at: source) }
-        try preflight.imageData.write(to: source, options: .atomic)
-
-        let ocr = try OCR.recognize(
-            imageAt: source.path,
+        let settle = boundedInt(flags["settle-ms"], default: 1_000, minimum: 0, maximum: 10_000)
+        let ocr = OCR.search(
+            matches: preflight.ocrMatches,
             query: query,
             x0: boundedDouble(flags["x0"], default: 0, minimum: 0, maximum: 1),
             y0: boundedDouble(flags["y0"], default: 0, minimum: 0, maximum: 1),
@@ -611,6 +725,10 @@ enum MirrorCtl {
             )
             try preflight.imageData.write(to: outputURL, options: .atomic)
             var result = preflight.capture
+            appendInteractionState(to: &result, matches: preflight.ocrMatches)
+            result["analysisRecognitionLevel"] = "accurate-preflight-reuse"
+            result["visualDistanceFromPreflight"] = 0.0
+            result["screenChanged"] = false
             result["path"] = output
             result["ocr"] = ocr
             result["tap"] = [
@@ -630,8 +748,13 @@ enum MirrorCtl {
             overlay: overlay,
             preparedWindow: preflight.window
         )
-        if settle > 0 { usleep(useconds_t(settle * 1_000)) }
-        var result = try Capture.screenshot(window: preflight.window, to: output)
+        var result = try captureAfterAction(
+            window: preflight.window,
+            output: output,
+            preflight: preflight,
+            maximumSettleMs: settle
+        )
+        try appendInteractionState(to: &result, imageAt: output)
         result["tap"] = tap
         result["ocr"] = [
             "query": query,
@@ -640,7 +763,7 @@ enum MirrorCtl {
             "cy": y,
             "confidence": ocr["confidence"] ?? NSNull(),
         ]
-        result["settleMs"] = settle
+        result["maximumSettleMs"] = settle
         result["atomicLabelSelection"] = true
         return result
     }

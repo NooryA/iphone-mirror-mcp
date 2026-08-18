@@ -55,7 +55,7 @@ command = args[0]
 def value(flag):
     return args[args.index(flag) + 1]
 
-if command in {{"screenshot", "tap-and-capture", "tap-label-and-capture"}}:
+if command in {{"screenshot", "capture-analyze", "tap-and-capture", "tap-label-and-capture"}}:
     output = value("--out")
     Image.new("RGB", (32, 64), (20, 40, 60)).save(output)
     result = {{
@@ -69,15 +69,35 @@ if command in {{"screenshot", "tap-and-capture", "tap-label-and-capture"}}:
         "contentWidth": 16,
         "contentHeight": 32,
     }}
+    if command == "capture-analyze":
+        result.update({{
+            "iphoneInUse": False,
+            "interactionBlocked": False,
+            "blockedReason": None,
+        }})
+        if "--query" in args:
+            query = value("--query")
+            matches = []
+            if query == "Settings":
+                matches = [{{"text": "Settings", "cx": 0.4, "cy": 0.3, "confidence": 0.99}}]
+            result["ocr"] = {{"ok": True, "found": bool(matches), "query": query, "matches": matches}}
+            if matches:
+                result["ocr"].update(matches[0])
     if command == "tap-and-capture":
         result["tap"] = {{"ok": True}}
         result["preflightSha256"] = "a" * 64
+        result["screenChanged"] = True
+        result["visualDistanceFromPreflight"] = 12.0
+        result.update({{"iphoneInUse": False, "interactionBlocked": False, "blockedReason": None}})
     if command == "tap-label-and-capture":
         query = value("--query")
         found = query == "Settings"
         result["atomicLabelSelection"] = True
         result["tap"] = {{"ok": found}}
+        result["screenChanged"] = found
+        result["visualDistanceFromPreflight"] = 12.0 if found else 0.0
         result["ocr"] = {{"query": query, "found": found, "matches": []}}
+        result.update({{"iphoneInUse": False, "interactionBlocked": False, "blockedReason": None}})
 elif command == "ocr":
     query = value("--query")
     matches = []

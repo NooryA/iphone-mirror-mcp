@@ -110,14 +110,39 @@ def _validate_expected_sha256(expected_sha256: str | None) -> str | None:
 
 
 @contextmanager
-def _capture_file() -> Iterator[tuple[dict[str, Any], str]]:
-    """Capture to a short-lived file and always remove it after the tool result is materialized."""
+def _capture_file(
+    *,
+    ocr_query: str | None = None,
+    ocr_region: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0),
+    ocr_limit: int = 8,
+) -> Iterator[tuple[dict[str, Any], str]]:
+    """Capture and classify one frame in one native process, then remove its short-lived file."""
     fd, path = tempfile.mkstemp(prefix="iphone-mirror-", suffix=".png")
     os.close(fd)
     try:
-        result = run_ctl("screenshot", "--out", path)
+        ocr_args = (
+            (
+                "--query",
+                ocr_query,
+                "--x0",
+                str(ocr_region[0]),
+                "--y0",
+                str(ocr_region[1]),
+                "--x1",
+                str(ocr_region[2]),
+                "--y1",
+                str(ocr_region[3]),
+                "--limit",
+                str(ocr_limit),
+            )
+            if ocr_query is not None
+            else ()
+        )
+        result = run_ctl("capture-analyze", "--out", path, *ocr_args)
         result.pop("path", None)
         annotate_screenshot(result, path)
+        if "interactionBlocked" not in result:
+            _annotate_interaction_state(result, path)
         yield result, path
     finally:
         try:
@@ -173,6 +198,7 @@ def _attach_screen_state(result: dict[str, Any], screen: dict[str, Any]) -> dict
         "iphoneInUseHeuristic",
         "interactionBlocked",
         "blockedReason",
+        "analysisRecognitionLevel",
     ):
         result[key] = screen.get(key)
     return result
@@ -251,7 +277,7 @@ def tap_and_see(
     x: float,
     y: float,
     mode: Mode = "skylight",
-    settle_ms: int = 300,
+    settle_ms: int = 1_000,
     expected_sha256: str | None = None,
 ) -> ImageToolResult:
     """Safely tap, wait up to 10 seconds, then return the resulting screenshot."""
@@ -336,7 +362,6 @@ def wait_for_change(timeout_ms: int = 8_000, interval_ms: int = 400) -> ImageToo
     timeout = _bounded_int(timeout_ms, name="timeout_ms", minimum=0, maximum=MAX_WAIT_MS)
     interval = _bounded_int(interval_ms, name="interval_ms", minimum=50, maximum=5_000)
     with _capture_file() as (baseline, baseline_path):
-        _annotate_interaction_state(baseline, baseline_path)
         baseline_hash = str(baseline.get("sha256") or "")
         baseline_visual_hash = str(baseline.get("visualHash") or "")
         baseline_visual_signature = str(baseline.get("visualSignature") or "")
@@ -355,7 +380,6 @@ def wait_for_change(timeout_ms: int = 8_000, interval_ms: int = 400) -> ImageToo
         if elapsed_ms < timeout:
             time.sleep(min(interval, timeout - elapsed_ms) / 1000.0)
         with _capture_file() as (result, path):
-            _annotate_interaction_state(result, path)
             elapsed_ms = int((time.monotonic() - started) * 1_000)
             sha256_changed = str(result.get("sha256") or "") != baseline_hash
             changed, hash_distance, signature_distance = _visual_changed(
@@ -394,7 +418,6 @@ def find_color(
     minimum = _bounded_int(min_pixels, name="min_pixels", minimum=1, maximum=1_000_000)
     region = _validate_region(x0, y0, x1, y1)
     with _capture_file() as (result, path):
-        _annotate_interaction_state(result, path)
         hit = find_pixels(
             path,
             red=red,
@@ -424,7 +447,6 @@ def find_bright(
     minimum = _bounded_int(min_pixels, name="min_pixels", minimum=1, maximum=1_000_000)
     region = _validate_region(x0, y0, x1, y1)
     with _capture_file() as (result, path):
-        _annotate_interaction_state(result, path)
         hit = find_pixels(
             path,
             min_lum=luminance,
@@ -448,9 +470,8 @@ def find_text(
 ) -> dict[str, Any]:
     """Screenshot and use local Vision OCR to locate a visible label."""
     query, region, cap = _validated_text_search(query, x0, y0, x1, y1, limit)
-    with _capture_file() as (result, path):
-        _annotate_interaction_state(result, path)
-        hit = _find_text_in_capture(query, region, cap, path)
+    with _capture_file(ocr_query=query, ocr_region=region, ocr_limit=cap) as (result, _):
+        hit = dict(result.pop("ocr"))
     return _attach_screen_state(hit, result)
 
 
@@ -473,36 +494,11 @@ def _validated_text_search(
     return query, region, cap
 
 
-def _find_text_in_capture(
-    query: str,
-    region: tuple[float, float, float, float],
-    limit: int,
-    path: str,
-) -> dict[str, Any]:
-    return run_ctl(
-        "ocr",
-        "--image",
-        path,
-        "--query",
-        query,
-        "--x0",
-        str(region[0]),
-        "--y0",
-        str(region[1]),
-        "--x1",
-        str(region[2]),
-        "--y1",
-        str(region[3]),
-        "--limit",
-        str(limit),
-    )
-
-
 @mcp.tool(annotations=INPUT_TOOL)
 def tap_label(
     query: str,
     mode: Mode = "skylight",
-    settle_ms: int = 300,
+    settle_ms: int = 1_000,
     x0: float = 0.0,
     y0: float = 0.0,
     x1: float = 1.0,

@@ -275,7 +275,7 @@ enum Input {
         }
         let confirmed = awaitFrontmost(
             pid: expected.pid,
-            activate: { app.isActive || app.activate() },
+            activate: { requestActivation(app) },
             frontmostPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
             pause: { usleep(25_000) }
         )
@@ -289,17 +289,54 @@ enum Input {
         return refreshed
     }
 
+    private static func requestActivation(_ app: NSRunningApplication) -> Bool {
+        if app.isActive { return true }
+        _ = app.activate()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = activationScriptArguments()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            let deadline = DispatchTime.now().uptimeNanoseconds + 1_000_000_000
+            while process.isRunning, DispatchTime.now().uptimeNanoseconds < deadline {
+                usleep(10_000)
+            }
+            if process.isRunning {
+                process.terminate()
+                let terminateDeadline = DispatchTime.now().uptimeNanoseconds + 250_000_000
+                while process.isRunning, DispatchTime.now().uptimeNanoseconds < terminateDeadline {
+                    usleep(10_000)
+                }
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            }
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    static func activationScriptArguments() -> [String] {
+        ["-e", "tell application id \"\(WindowFinder.bundleId)\" to activate"]
+    }
+
     static func awaitFrontmost(
         pid: pid_t,
-        attempts: Int = 20,
+        attempts: Int = 60,
         activate: () -> Bool,
         frontmostPID: () -> pid_t?,
         pause: () -> Void
     ) -> Bool {
-        guard activate() else { return false }
-        for attempt in 0..<max(1, attempts) {
+        let count = max(1, attempts)
+        for attempt in 0..<count {
             if frontmostPID() == pid { return true }
-            if attempt + 1 < attempts { pause() }
+            if attempt == 0 || attempt.isMultiple(of: 12) {
+                _ = activate()
+            }
+            if frontmostPID() == pid { return true }
+            if attempt + 1 < count { pause() }
         }
         return false
     }
@@ -372,12 +409,7 @@ enum Input {
     }
 
     static func cliclickTapArguments(x: Int, y: Int) -> [String] {
-        [
-            "w:\(cliclickWaitMs)",
-            "m:\(cliclickCoordinate(x)),\(cliclickCoordinate(y))",
-            "w:\(cliclickWaitMs)",
-            "c:\(cliclickCoordinate(x)),\(cliclickCoordinate(y))",
-        ]
+        ["c:\(cliclickCoordinate(x)),\(cliclickCoordinate(y))"]
     }
 
     /// cliclick treats a leading minus as a relative coordinate unless it is prefixed with `=`.

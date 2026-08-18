@@ -9,6 +9,7 @@ struct ScreenPreconditionState {
     let window: MirrorWindow
     let capture: [String: Any]
     let imageData: Data
+    let ocrMatches: [[String: Any]]
 
     var json: [String: Any] {
         var result: [String: Any] = [
@@ -49,16 +50,8 @@ enum ScreenPrecondition {
         let data = try Data(contentsOf: currentURL)
         let actual = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         let signature = try VisualComparison.signature(at: currentURL)
-        let ocr = try OCR.recognize(
-            imageAt: currentURL.path,
-            query: "",
-            x0: 0,
-            y0: 0,
-            x1: 1,
-            y1: 1,
-            limit: 32
-        )
-        if let blockedReason = blockedReason(from: ocr["matches"] as? [[String: Any]] ?? []) {
+        let ocrMatches = try OCR.scan(imageAt: currentURL.path)
+        if let blockedReason = blockedReason(from: ocrMatches) {
             throw MirrorError.invalidArgs(
                 "interaction blocked by iPhone Mirroring host state: \(blockedReason)"
             )
@@ -96,7 +89,8 @@ enum ScreenPrecondition {
             visualDistance: visualDistance,
             window: window,
             capture: capture,
-            imageData: data
+            imageData: data,
+            ocrMatches: ocrMatches
         )
     }
 

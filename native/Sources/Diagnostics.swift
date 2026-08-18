@@ -41,8 +41,8 @@ enum Diagnostics {
             )
         )
         let cliclickEdgesPassed = edgePoint == (-762, 1_805)
-        let explicitTapTargetPassed = Input.cliclickTapArguments(x: -762, y: 1_805).last
-            == "c:=-762,1805"
+        let tapArguments = Input.cliclickTapArguments(x: -762, y: 1_805)
+        let explicitTapTargetPassed = tapArguments == ["c:=-762,1805"]
         let pointerGuardPassed = Input.pointerRemainsAtTarget(
             CGPoint(x: 100, y: 100),
             target: CGPoint(x: 104, y: 104)
@@ -73,6 +73,22 @@ enum Diagnostics {
         )
         if !activationRejected { syntheticInputCalls += 1 }
         let activationGatePassed = activationRejected && syntheticInputCalls == 0
+        var activationRequests = 0
+        let transientActivationAccepted = Input.awaitFrontmost(
+            pid: pid,
+            attempts: 14,
+            activate: {
+                activationRequests += 1
+                return false
+            },
+            frontmostPID: { activationRequests >= 2 ? pid : pid + 1 },
+            pause: {}
+        )
+        let activationRetryPassed = transientActivationAccepted && activationRequests == 2
+        let activationScriptScopePassed = Input.activationScriptArguments() == [
+            "-e",
+            "tell application id \"com.apple.ScreenContinuity\" to activate",
+        ]
         let typingFixture = String(repeating: "a", count: 260) + "🙂"
         let typingChunks = Input.textChunks(typingFixture, maximumCharacters: 128)
         let typingChunkingPassed = typingChunks.count == 3
@@ -81,6 +97,35 @@ enum Diagnostics {
         let dependencyPreflightPassed = MirrorCtl.requiresCliclick("open-app")
             && MirrorCtl.requiresCliclick("tap-label-and-capture")
             && !MirrorCtl.requiresCliclick("menu")
+        let reusableOCRMatches: [[String: Any]] = [
+            ["text": "Continue", "cx": 0.5, "cy": 0.72, "confidence": 0.98],
+            ["text": "Cancel", "cx": 0.5, "cy": 0.88, "confidence": 0.99],
+        ]
+        let reusedOCR = OCR.search(
+            matches: reusableOCRMatches,
+            query: "continue",
+            x0: 0.2,
+            y0: 0.6,
+            x1: 0.8,
+            y1: 0.8,
+            limit: 8
+        )
+        let ocrObservationReusePassed = reusedOCR["found"] as? Bool == true
+            && reusedOCR["text"] as? String == "Continue"
+            && reusedOCR["matches"] as? [[String: Any]] != nil
+        let adaptiveSettlementPassed = !MirrorCtl.shouldFinishSettlement(
+            visualDistance: 0,
+            elapsedMs: 200,
+            maximumSettleMs: 1_000
+        ) && MirrorCtl.shouldFinishSettlement(
+            visualDistance: VisualComparison.materialDifferenceThreshold + 0.1,
+            elapsedMs: 200,
+            maximumSettleMs: 1_000
+        ) && MirrorCtl.shouldFinishSettlement(
+            visualDistance: 0,
+            elapsedMs: 1_000,
+            maximumSettleMs: 1_000
+        )
         let parserPassed: Bool
         do {
             let parsed = try MirrorCtl.parseFlags(
@@ -161,8 +206,10 @@ enum Diagnostics {
         return [
             "ok": selectionPassed && coordinatesPassed
                 && cliclickCoordinatesPassed && cliclickEdgesPassed && explicitTapTargetPassed
-                && pointerGuardPassed && midScrollAbortPassed && activationGatePassed
-                && typingChunkingPassed && dependencyPreflightPassed
+                && pointerGuardPassed && midScrollAbortPassed && activationGatePassed && activationRetryPassed
+                && activationScriptScopePassed
+                && typingChunkingPassed && dependencyPreflightPassed && ocrObservationReusePassed
+                && adaptiveSettlementPassed
                 && parserPassed && parserRejectsInvalid && visualComparisonPassed
                 && spotlightSelectionPassed && spotlightEntryPassed
                 && normalizedRemapPassed && preparedWindowIdentityPassed
@@ -176,8 +223,12 @@ enum Diagnostics {
             "midActionPointerGuard": pointerGuardPassed,
             "midScrollAbort": midScrollAbortPassed,
             "activationGate": activationGatePassed,
+            "activationRetry": activationRetryPassed,
+            "activationScriptScope": activationScriptScopePassed,
             "typingChunking": typingChunkingPassed,
             "dependencyPreflight": dependencyPreflightPassed,
+            "ocrObservationReuse": ocrObservationReusePassed,
+            "adaptiveSettlement": adaptiveSettlementPassed,
             "argumentParser": parserPassed,
             "argumentParserRejectsInvalid": parserRejectsInvalid,
             "visualComparison": visualComparisonPassed,
