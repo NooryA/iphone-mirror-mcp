@@ -4,46 +4,30 @@ import ImageIO
 import Vision
 
 enum OCR {
-    static func recognize(
+    static func scan(
         imageAt path: String,
-        query: String,
-        x0: Double,
-        y0: Double,
-        x1: Double,
-        y1: Double,
-        limit: Int
-    ) throws -> [String: Any] {
+        recognitionLevel: VNRequestTextRecognitionLevel = .accurate
+    ) throws -> [[String: Any]] {
         guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
               let image = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
             throw MirrorError.invalidArgs("ocr could not read image at \(path)")
         }
 
         let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
+        request.recognitionLevel = recognitionLevel
         request.usesLanguageCorrection = false
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         try handler.perform([request])
 
-        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        var hits: [[String: Any]] = []
+        var matches: [[String: Any]] = []
         for observation in request.results ?? [] {
             guard let candidate = observation.topCandidates(1).first else { continue }
             let box = visionToTopLeft(observation.boundingBox)
-            let cx = box.cx
-            let cy = box.cy
-            if cx < x0 || cx > x1 || cy < y0 || cy > y1 { continue }
-            if !needle.isEmpty,
-               candidate.string.range(
-                of: needle,
-                options: [.caseInsensitive, .diacriticInsensitive]
-               ) == nil {
-                continue
-            }
-            hits.append([
+            matches.append([
                 "text": candidate.string,
                 "confidence": Double(candidate.confidence),
-                "cx": cx,
-                "cy": cy,
+                "cx": box.cx,
+                "cy": box.cy,
                 "bbox": [
                     "x0": box.x0,
                     "y0": box.y0,
@@ -51,6 +35,32 @@ enum OCR {
                     "y1": box.y1,
                 ],
             ])
+        }
+        return matches
+    }
+
+    static func search(
+        matches: [[String: Any]],
+        query: String,
+        x0: Double,
+        y0: Double,
+        x1: Double,
+        y1: Double,
+        limit: Int
+    ) -> [String: Any] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        var hits = matches.filter { match in
+            guard let cx = (match["cx"] as? NSNumber)?.doubleValue,
+                  let cy = (match["cy"] as? NSNumber)?.doubleValue else { return false }
+            if cx < x0 || cx > x1 || cy < y0 || cy > y1 { return false }
+            if !needle.isEmpty {
+                guard let text = match["text"] as? String,
+                      text.range(
+                          of: needle,
+                          options: [.caseInsensitive, .diacriticInsensitive]
+                      ) != nil else { return false }
+            }
+            return true
         }
 
         hits.sort { left, right in
@@ -93,6 +103,26 @@ enum OCR {
             result["cy"] = NSNull()
         }
         return result
+    }
+
+    static func recognize(
+        imageAt path: String,
+        query: String,
+        x0: Double,
+        y0: Double,
+        x1: Double,
+        y1: Double,
+        limit: Int
+    ) throws -> [String: Any] {
+        search(
+            matches: try scan(imageAt: path),
+            query: query,
+            x0: x0,
+            y0: y0,
+            x1: x1,
+            y1: y1,
+            limit: limit
+        )
     }
 
     /// Vision boxes are normalized with origin at the bottom-left.

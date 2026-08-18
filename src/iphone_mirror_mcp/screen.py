@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import math
+from dataclasses import dataclass
 from typing import Any
 
 from PIL import Image
@@ -19,6 +22,27 @@ _BLOCKED_TEXT_MARKERS = (
     ("connection paused", "connection_paused"),
 )
 
+# Vision boxes for neighboring glyph runs can overlap slightly. Bound that tolerance by text
+# height so genuine splits join without accepting nested or duplicate observations.
+_MAXIMUM_ADJACENT_BOX_OVERLAP_SCALE = 0.25
+
+
+@dataclass(frozen=True)
+class _PositionedText:
+    text: str
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+    @property
+    def center_y(self) -> float:
+        return (self.y0 + self.y1) / 2
+
+    @property
+    def height(self) -> float:
+        return self.y1 - self.y0
+
 
 def sha256_file(path: str) -> str:
     digest = hashlib.sha256()
@@ -31,8 +55,12 @@ def sha256_file(path: str) -> str:
 def visual_hash_file(path: str) -> str:
     """Return a compact difference hash that ignores insignificant video-frame noise."""
     with Image.open(path) as image:
-        gray = image.convert("L").resize((9, 8), Image.Resampling.BILINEAR)
-        pixels = list(gray.get_flattened_data())
+        return _visual_hash_image(image)
+
+
+def _visual_hash_image(image: Image.Image) -> str:
+    gray = image.convert("L").resize((9, 8), Image.Resampling.BILINEAR)
+    pixels = list(gray.get_flattened_data())
     value = 0
     for row in range(8):
         offset = row * 9
@@ -49,15 +77,19 @@ def visual_hash_distance(left: str, right: str) -> int:
 def visual_signature_file(path: str) -> str:
     """Sample absolute RGB values so flat/color-only transitions remain visible."""
     with Image.open(path) as image:
-        rgb = image.convert("RGB")
-        width, height = rgb.size
-        pixels = rgb.load()
-        samples = bytearray()
-        for row in range(VISUAL_SIGNATURE_SIZE):
-            y = min(height - 1, int((row + 0.5) * height / VISUAL_SIGNATURE_SIZE))
-            for column in range(VISUAL_SIGNATURE_SIZE):
-                x = min(width - 1, int((column + 0.5) * width / VISUAL_SIGNATURE_SIZE))
-                samples.extend(pixels[x, y])
+        return _visual_signature_image(image)
+
+
+def _visual_signature_image(image: Image.Image) -> str:
+    rgb = image.convert("RGB")
+    width, height = rgb.size
+    pixels = rgb.load()
+    samples = bytearray()
+    for row in range(VISUAL_SIGNATURE_SIZE):
+        y = min(height - 1, int((row + 0.5) * height / VISUAL_SIGNATURE_SIZE))
+        for column in range(VISUAL_SIGNATURE_SIZE):
+            x = min(width - 1, int((column + 0.5) * width / VISUAL_SIGNATURE_SIZE))
+            samples.extend(pixels[x, y])
     return f"{VISUAL_SIGNATURE_VERSION}:{samples.hex()}"
 
 
@@ -85,8 +117,12 @@ def png_pixel_size(path: str) -> tuple[int, int]:
 def detect_iphone_in_use(path: str) -> bool:
     """True when the mirror window is the 'iPhone in Use / Lock your iPhone' chrome."""
     with Image.open(path) as image:
-        small = image.convert("RGB").resize((64, 128))
-        raw = small.tobytes()
+        return _detect_iphone_in_use_image(image)
+
+
+def _detect_iphone_in_use_image(image: Image.Image) -> bool:
+    small = image.convert("RGB").resize((64, 128))
+    raw = small.tobytes()
     pixels = [(raw[index], raw[index + 1], raw[index + 2]) for index in range(0, len(raw), 3)]
     count = len(pixels)
     if count == 0:
@@ -100,26 +136,125 @@ def detect_iphone_in_use(path: str) -> bool:
 
 
 def annotate_screenshot(result: dict[str, Any], path: str) -> dict[str, Any]:
-    width, height = png_pixel_size(path)
+    with open(path, "rb") as handle:
+        png = handle.read()
+    with Image.open(io.BytesIO(png)) as image:
+        image.load()
+        width, height = image.size
+        visual_hash = _visual_hash_image(image)
+        visual_signature = _visual_signature_image(image)
+        iphone_in_use_heuristic = _detect_iphone_in_use_image(image)
     result["pngWidth"] = width
     result["pngHeight"] = height
-    result["sha256"] = sha256_file(path)
-    result["visualHash"] = visual_hash_file(path)
-    result["visualSignature"] = visual_signature_file(path)
-    result["iphoneInUseHeuristic"] = detect_iphone_in_use(path)
-    result["iphoneInUse"] = False
+    result["sha256"] = hashlib.sha256(png).hexdigest()
+    result["visualHash"] = visual_hash
+    result["visualSignature"] = visual_signature
+    result["iphoneInUseHeuristic"] = iphone_in_use_heuristic
+    result.setdefault("iphoneInUse", False)
     return result
 
 
 def blocked_reason_from_ocr(matches: list[dict[str, Any]], *, iphone_in_use: bool) -> str | None:
     """Classify known host-side blocking screens without confusing ordinary iOS UI."""
     del iphone_in_use  # Kept for API compatibility; the low-variance heuristic alone is not decisive.
-    combined = " ".join(str(match.get("text") or "") for match in matches)
-    normalized = " ".join(combined.casefold().split())
-    for marker, reason in _BLOCKED_TEXT_MARKERS:
-        if marker in normalized:
+    normalized_texts = [_normalize_text(str(match.get("text") or "")) for match in matches]
+    for text in normalized_texts:
+        if reason := _blocked_reason_in_text(text):
+            return reason
+
+    # Mirror the native classifier: split OCR observations may form a warning only when their
+    # boxes are adjacent in reading order. Global concatenation can falsely combine unrelated UI.
+    for run in _adjacent_text_runs(matches):
+        if reason := _blocked_reason_in_text(" ".join(item.text for item in run)):
             return reason
     return None
+
+
+def _normalize_text(text: str) -> str:
+    return " ".join(text.casefold().split())
+
+
+def _blocked_reason_in_text(text: str) -> str | None:
+    for marker, reason in _BLOCKED_TEXT_MARKERS:
+        if marker in text:
+            return reason
+    return None
+
+
+def _positioned_text(match: dict[str, Any]) -> _PositionedText | None:
+    text = _normalize_text(str(match.get("text") or ""))
+    bbox = match.get("bbox")
+    if not text or not isinstance(bbox, dict):
+        return None
+    values = [bbox.get(key) for key in ("x0", "y0", "x1", "y1")]
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in values):
+        return None
+    x0, y0, x1, y1 = (float(value) for value in values)
+    if not all(math.isfinite(value) for value in (x0, y0, x1, y1)):
+        return None
+    if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
+        return None
+    return _PositionedText(text=text, x0=x0, y0=y0, x1=x1, y1=y1)
+
+
+def _adjacent_text_runs(matches: list[dict[str, Any]]) -> list[list[_PositionedText]]:
+    positioned = sorted(
+        filter(None, (_positioned_text(match) for match in matches)),
+        key=lambda item: (item.center_y, item.x0),
+    )
+    lines: list[list[_PositionedText]] = []
+    for item in positioned:
+        if lines:
+            center_y = sum(existing.center_y for existing in lines[-1]) / len(lines[-1])
+            mean_height = sum(existing.height for existing in lines[-1]) / len(lines[-1])
+            if abs(item.center_y - center_y) <= 0.6 * max(item.height, mean_height):
+                lines[-1].append(item)
+                continue
+        lines.append([item])
+    for line in lines:
+        line.sort(key=lambda item: item.x0)
+
+    runs: list[list[_PositionedText]] = []
+    previous_line: list[_PositionedText] | None = None
+    for line in lines:
+        segments: list[list[_PositionedText]] = []
+        for item in line:
+            if segments and _horizontally_adjacent(segments[-1][-1], item):
+                segments[-1].append(item)
+            else:
+                segments.append([item])
+        if previous_line and runs and segments and _wraps_from(previous_line, line):
+            runs[-1].extend(segments.pop(0))
+        runs.extend(segments)
+        previous_line = line
+    return runs
+
+
+def _horizontally_adjacent(left: _PositionedText, right: _PositionedText) -> bool:
+    minimum_gap = -_MAXIMUM_ADJACENT_BOX_OVERLAP_SCALE * min(left.height, right.height)
+    maximum_gap = max(0.015, 1.75 * max(left.height, right.height))
+    gap = right.x0 - left.x1
+    return minimum_gap <= gap <= maximum_gap
+
+
+def _wraps_from(upper: list[_PositionedText], lower: list[_PositionedText]) -> bool:
+    upper_height = sum(item.height for item in upper) / len(upper)
+    lower_height = sum(item.height for item in lower) / len(lower)
+    upper_x0 = min(item.x0 for item in upper)
+    upper_x1 = max(item.x1 for item in upper)
+    lower_x0 = min(item.x0 for item in lower)
+    lower_x1 = max(item.x1 for item in lower)
+    upper_center_y = sum(item.center_y for item in upper) / len(upper)
+    lower_center_y = sum(item.center_y for item in lower) / len(lower)
+    if lower_center_y <= upper_center_y:
+        return False
+    vertical_gap = min(item.y0 for item in lower) - max(item.y1 for item in upper)
+    minimum_vertical_gap = -_MAXIMUM_ADJACENT_BOX_OVERLAP_SCALE * min(upper_height, lower_height)
+    maximum_vertical_gap = max(0.02, 1.5 * max(upper_height, lower_height))
+    if not minimum_vertical_gap <= vertical_gap <= maximum_vertical_gap:
+        return False
+    maximum_horizontal_gap = max(0.03, 2 * max(upper_height, lower_height))
+    return lower_x0 <= upper_x1 + maximum_horizontal_gap and lower_x1 >= upper_x0 - maximum_horizontal_gap
 
 
 def _in_range(value: int, target: int, tolerance: int) -> bool:

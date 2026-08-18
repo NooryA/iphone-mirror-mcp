@@ -29,7 +29,7 @@ def _install_fake_native(
         del timeout
         calls.append(args)
         command = args[0]
-        if command in {"screenshot", "tap-and-capture", "tap-label-and-capture"}:
+        if command in {"screenshot", "capture-analyze", "tap-and-capture", "tap-label-and-capture"}:
             output = args[args.index("--out") + 1]
             image = Image.new("RGB", (60, 120), (0, 0, 0))
             for pixel_y in range(120):
@@ -50,16 +50,66 @@ def _install_fake_native(
                 "contentWidth": 300,
                 "contentHeight": 600,
             }
+            if command == "capture-analyze":
+                host_matches = ocr_matches or []
+                blocked_reason = server.blocked_reason_from_ocr(host_matches, iphone_in_use=False)
+                result.update(
+                    {
+                        "iphoneInUse": blocked_reason == "iphone_in_use",
+                        "interactionBlocked": blocked_reason is not None,
+                        "blockedReason": blocked_reason,
+                    }
+                )
+                if "--query" in args:
+                    query = args[args.index("--query") + 1]
+                    matches = [label_hit] if label_hit else []
+                    result["ocr"] = {
+                        "ok": True,
+                        "query": query,
+                        "found": bool(matches),
+                        "matches": matches,
+                        **(label_hit or {}),
+                    }
             if command == "tap-and-capture":
+                settle = int(args[args.index("--settle-ms") + 1])
                 result["command"] = command
                 result["preflightSha256"] = "a" * 64
                 result["tap"] = {"ok": True}
+                result["screenChanged"] = True
+                result["visualDistanceFromPreflight"] = 12.0
+                result.update(
+                    {
+                        "settleMs": settle,
+                        "maximumSettleMs": settle,
+                        "settledMs": min(settle, 180),
+                        "settlementCaptures": 2,
+                        "screenStable": True,
+                        "settlementTimedOut": False,
+                        "settlementState": "settled",
+                    }
+                )
+                result.update({"iphoneInUse": False, "interactionBlocked": False, "blockedReason": None})
             if command == "tap-label-and-capture":
                 query = args[args.index("--query") + 1]
                 matches = [label_hit] if label_hit else []
                 result["command"] = command
                 result["atomicLabelSelection"] = True
                 result["tap"] = {"ok": bool(matches)}
+                result["screenChanged"] = bool(matches)
+                result["visualDistanceFromPreflight"] = 12.0 if matches else 0.0
+                if matches:
+                    settle = int(args[args.index("--settle-ms") + 1])
+                    result.update(
+                        {
+                            "settleMs": settle,
+                            "maximumSettleMs": settle,
+                            "settledMs": min(settle, 180),
+                            "settlementCaptures": 2,
+                            "screenStable": True,
+                            "settlementTimedOut": False,
+                            "settlementState": "settled",
+                        }
+                    )
                 if not matches:
                     result["tap"].update({"error": "label not found", "query": query, "matches": []})
                 result["ocr"] = {
@@ -68,6 +118,7 @@ def _install_fake_native(
                     "matches": matches,
                     **(label_hit or {}),
                 }
+                result.update({"iphoneInUse": False, "interactionBlocked": False, "blockedReason": None})
             return result
         if command == "ocr":
             query = args[args.index("--query") + 1]
@@ -325,10 +376,17 @@ def test_all_public_tool_families_dispatch_with_validated_arguments(
     assert server.find_color(220, 80, 30, tolerance=0, min_pixels=1)["found"] is True
     assert server.find_bright(min_lum=200, min_pixels=1)["found"] is True
     assert server.find_text("Settings")["text"] == "Settings"
+    coordinate_tap = _metadata(server.tap_and_see(0.5, 0.5, settle_ms=321))
+    assert coordinate_tap["settleMs"] == 321
+    assert coordinate_tap["maximumSettleMs"] == 321
+    assert coordinate_tap["screenStable"] is True
     label_call_start = len(calls)
     tapped = _metadata(server.tap_label("Settings", settle_ms=0))
     assert tapped["ocr"]["text"] == "Settings"
     assert tapped["atomicLabelSelection"] is True
+    assert tapped["screenChanged"] is True
+    assert tapped["settleMs"] == 0
+    assert tapped["maximumSettleMs"] == 0
     label_tap_call = [call for call in calls if call[0] == "tap-label-and-capture"][-1]
     assert label_tap_call[label_tap_call.index("--query") + 1] == "Settings"
     assert "--expected-image" not in label_tap_call
@@ -351,7 +409,7 @@ def test_all_public_tool_families_dispatch_with_validated_arguments(
         "key",
         "menu",
         "open-app",
-        "ocr",
+        "capture-analyze",
         "tap-label-and-capture",
     } <= dispatched
 
@@ -364,6 +422,7 @@ def test_tap_label_not_found_returns_current_screen(
     payload = _metadata(server.tap_label("Missing"))
     assert payload["tap"]["ok"] is False
     assert payload["tap"]["error"] == "label not found"
+    assert payload["screenChanged"] is False
 
 
 @pytest.mark.parametrize("text", ["", "x" * (server.MAX_TEXT_LENGTH + 1), "hello\nworld", "nul\0text"])
@@ -391,7 +450,7 @@ def test_arbitrary_leading_dash_text_is_preserved_for_native_argv(
     server.find_text("--query")
     server.type_text("--text")
     server.open_app("--name")
-    ocr = [call for call in calls if call[0] == "ocr" and "--query" in call][-1]
+    ocr = [call for call in calls if call[0] == "capture-analyze" and "--query" in call][-1]
     typed = next(call for call in calls if call[0] == "type")
     opened = next(call for call in calls if call[0] == "open-app")
     assert ocr[ocr.index("--query") + 1] == "--query"

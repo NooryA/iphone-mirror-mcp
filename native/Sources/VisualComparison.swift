@@ -2,17 +2,27 @@ import CoreGraphics
 import Foundation
 import ImageIO
 
+struct VisualObservation {
+    let signature: String
+    let structuralHash: String
+}
+
 enum VisualComparison {
     static let signatureVersion = "rgb16"
     static let sampleSize = 16
     static let materialDifferenceThreshold = 6.0
+    static let structuralDifferenceThreshold = 8
+
+    static func observation(at url: URL) throws -> VisualObservation {
+        let image = try image(at: url)
+        return VisualObservation(
+            signature: try signature(of: image),
+            structuralHash: try structuralHash(of: image)
+        )
+    }
 
     static func signature(at url: URL) throws -> String {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            throw MirrorError.captureFailed("could not read image for visual comparison")
-        }
-        return try signature(of: image)
+        try signature(of: image(at: url))
     }
 
     static func signature(of image: CGImage) throws -> String {
@@ -64,8 +74,58 @@ enum VisualComparison {
         try distance(signature(at: left), signature(at: right))
     }
 
+    static func structuralHash(of image: CGImage) throws -> String {
+        let width = 9
+        let height = 8
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        guard let context = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else {
+            throw MirrorError.captureFailed("could not create structural comparison context")
+        }
+        context.interpolationQuality = .medium
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        var value: UInt64 = 0
+        for row in 0..<height {
+            let offset = row * width
+            for column in 0..<(width - 1) {
+                value <<= 1
+                if pixels[offset + column] > pixels[offset + column + 1] { value |= 1 }
+            }
+        }
+        return String(format: "%016llx", value)
+    }
+
+    static func structuralDistance(_ left: String, _ right: String) throws -> Int {
+        guard left.count == 16, right.count == 16,
+              let leftValue = UInt64(left, radix: 16),
+              let rightValue = UInt64(right, radix: 16) else {
+            throw MirrorError.invalidArgs("invalid structural visual hash")
+        }
+        return (leftValue ^ rightValue).nonzeroBitCount
+    }
+
     static func materiallyDifferent(_ left: String, _ right: String) throws -> Bool {
         try distance(left, right) > materialDifferenceThreshold
+    }
+
+    static func materiallyDifferent(_ left: VisualObservation, _ right: VisualObservation) throws -> Bool {
+        try distance(left.signature, right.signature) > materialDifferenceThreshold
+            || structuralDistance(left.structuralHash, right.structuralHash) > structuralDifferenceThreshold
+    }
+
+    private static func image(at url: URL) throws -> CGImage {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw MirrorError.captureFailed("could not read image for visual comparison")
+        }
+        return image
     }
 
     private static func decodeHex(_ value: String) -> [UInt8]? {

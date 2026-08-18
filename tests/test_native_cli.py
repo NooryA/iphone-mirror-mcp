@@ -62,8 +62,13 @@ def test_native_self_test_covers_window_selection_and_coordinate_round_trip() ->
         "midActionPointerGuard",
         "midScrollAbort",
         "activationGate",
+        "activationNativeGrace",
+        "activationRetry",
+        "activationScriptScope",
         "typingChunking",
         "dependencyPreflight",
+        "ocrObservationReuse",
+        "adaptiveSettlement",
         "argumentParser",
         "argumentParserRejectsInvalid",
         "visualComparison",
@@ -74,6 +79,11 @@ def test_native_self_test_covers_window_selection_and_coordinate_round_trip() ->
         "captureTimeoutIsolation",
         "windowOnlyCaptureFallback",
         "hostBlockerDetection",
+        "hostBlockerGeometryBoundaries",
+        "hostBlockerGeometryGrouping",
+        "hostBlockerMalformedGeometry",
+        "hostBlockerFallbackTrigger",
+        "ocrTwoPassEvidence",
     ):
         assert payload[check] is True
 
@@ -193,6 +203,25 @@ def test_native_tap_label_validation_does_not_require_a_phone_window(
     message: str,
 ) -> None:
     process, payload = _run("tap-label-and-capture", *args)
+    assert process.returncode == 1
+    assert payload["ok"] is False
+    assert message in payload["error"]
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        ((), "requires --out"),
+        (("--out", "/tmp/out.png", "--x0", "0.8", "--x1", "0.2"), "x0 < x1"),
+        (("--out", "/tmp/out.png", "--limit", "33"), "between 1 and 32"),
+        (("--out", "/tmp/out.png", "--query", "x" * 501), "at most 500"),
+    ],
+)
+def test_capture_analyze_validation_does_not_require_a_phone_window(
+    args: tuple[str, ...],
+    message: str,
+) -> None:
+    process, payload = _run("capture-analyze", *args)
     assert process.returncode == 1
     assert payload["ok"] is False
     assert message in payload["error"]

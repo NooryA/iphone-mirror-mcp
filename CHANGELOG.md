@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.0
+
+- Fuse capture, host-state classification, and optional text search into one native command instead of launching
+  separate capture and OCR processes.
+- Use fast Vision recognition for read-only analysis and retry accurate recognition only when a requested label is
+  missed.
+- Reuse accurate preflight OCR observations for atomic label targeting instead of OCRing the same frame twice.
+- Adaptively capture after taps until a material transition has a stable follow-up frame or the caller's settlement
+  budget is reached. Combine structural and absolute-color evidence, distinguish settled/time-out states, and
+  preserve `settleMs` as a response-compatibility alias.
+- Reduce each tap to one explicit absolute `cliclick` command while preserving coordinate, focus, and user-pointer
+  guards.
+- Verify the real frontmost process after activation, allow native activation a short grace period, and use a
+  bounded, fixed-bundle AppleScript fallback only when native activation remains unconfirmed.
+- Accurately recheck fast-OCR results that resemble known iPhone Mirroring host warnings before publishing the
+  read-only interaction state, while preserving definitive blocker evidence found by either OCR pass.
+- Decode captured images once when deriving Python-side hashes, dimensions, and host-state heuristics.
+- On the live test Mac and physical iPhone, warm median MCP screenshot time fell from about 671 ms to 311 ms and a
+  common `find_text` hit from about 1002 ms to 318 ms. Hardware, UI state, and first-run native compilation affect
+  absolute timings.
+
 ## 0.2.0
 
 - Select the actual phone window instead of larger setup or welcome windows.

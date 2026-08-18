@@ -273,9 +273,10 @@ enum Input {
               app.bundleIdentifier == WindowFinder.bundleId else {
             throw MirrorError.invalidArgs("could not resolve the iPhone Mirroring application")
         }
-        let confirmed = awaitFrontmost(
+        let confirmed = confirmFrontmostActivation(
             pid: expected.pid,
-            activate: { app.isActive || app.activate() },
+            nativeActivate: { app.isActive || app.activate() },
+            fallbackActivate: { requestScriptActivation() },
             frontmostPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
             pause: { usleep(25_000) }
         )
@@ -289,17 +290,73 @@ enum Input {
         return refreshed
     }
 
-    static func awaitFrontmost(
+    private static func requestScriptActivation() -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = activationScriptArguments()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            let deadline = DispatchTime.now().uptimeNanoseconds + 1_000_000_000
+            while process.isRunning, DispatchTime.now().uptimeNanoseconds < deadline {
+                usleep(10_000)
+            }
+            if process.isRunning {
+                process.terminate()
+                let terminateDeadline = DispatchTime.now().uptimeNanoseconds + 250_000_000
+                while process.isRunning, DispatchTime.now().uptimeNanoseconds < terminateDeadline {
+                    usleep(10_000)
+                }
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            }
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    static func activationScriptArguments() -> [String] {
+        ["-e", "tell application id \"\(WindowFinder.bundleId)\" to activate"]
+    }
+
+    static func confirmFrontmostActivation(
         pid: pid_t,
-        attempts: Int = 20,
-        activate: () -> Bool,
+        nativeGraceAttempts: Int = 8,
+        fallbackAttempts: Int = 40,
+        nativeActivate: () -> Bool,
+        fallbackActivate: () -> Bool,
         frontmostPID: () -> pid_t?,
         pause: () -> Void
     ) -> Bool {
-        guard activate() else { return false }
-        for attempt in 0..<max(1, attempts) {
+        if frontmostPID() == pid { return true }
+        _ = nativeActivate()
+        if pollFrontmost(
+            pid: pid,
+            attempts: nativeGraceAttempts,
+            frontmostPID: frontmostPID,
+            pause: pause
+        ) { return true }
+        _ = fallbackActivate()
+        return pollFrontmost(
+            pid: pid,
+            attempts: fallbackAttempts,
+            frontmostPID: frontmostPID,
+            pause: pause
+        )
+    }
+
+    private static func pollFrontmost(
+        pid: pid_t,
+        attempts: Int,
+        frontmostPID: () -> pid_t?,
+        pause: () -> Void
+    ) -> Bool {
+        let count = max(1, attempts)
+        for attempt in 0..<count {
             if frontmostPID() == pid { return true }
-            if attempt + 1 < attempts { pause() }
+            if attempt + 1 < count { pause() }
         }
         return false
     }
@@ -372,12 +429,7 @@ enum Input {
     }
 
     static func cliclickTapArguments(x: Int, y: Int) -> [String] {
-        [
-            "w:\(cliclickWaitMs)",
-            "m:\(cliclickCoordinate(x)),\(cliclickCoordinate(y))",
-            "w:\(cliclickWaitMs)",
-            "c:\(cliclickCoordinate(x)),\(cliclickCoordinate(y))",
-        ]
+        ["c:\(cliclickCoordinate(x)),\(cliclickCoordinate(y))"]
     }
 
     /// cliclick treats a leading minus as a relative coordinate unless it is prefixed with `=`.

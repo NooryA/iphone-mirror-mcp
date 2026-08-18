@@ -41,8 +41,8 @@ enum Diagnostics {
             )
         )
         let cliclickEdgesPassed = edgePoint == (-762, 1_805)
-        let explicitTapTargetPassed = Input.cliclickTapArguments(x: -762, y: 1_805).last
-            == "c:=-762,1805"
+        let tapArguments = Input.cliclickTapArguments(x: -762, y: 1_805)
+        let explicitTapTargetPassed = tapArguments == ["c:=-762,1805"]
         let pointerGuardPassed = Input.pointerRemainsAtTarget(
             CGPoint(x: 100, y: 100),
             target: CGPoint(x: 104, y: 104)
@@ -63,16 +63,63 @@ enum Diagnostics {
             currentPointer: CGPoint(x: 100, y: 100),
             target: CGPoint(x: 100, y: 100)
         ) == "iPhone Mirroring is no longer frontmost"
-        var syntheticInputCalls = 0
-        let activationRejected = !Input.awaitFrontmost(
+        var rejectedNativeCalls = 0
+        var rejectedFallbackCalls = 0
+        let activationRejected = !Input.confirmFrontmostActivation(
             pid: pid,
-            attempts: 3,
-            activate: { true },
+            nativeGraceAttempts: 2,
+            fallbackAttempts: 2,
+            nativeActivate: {
+                rejectedNativeCalls += 1
+                return false
+            },
+            fallbackActivate: {
+                rejectedFallbackCalls += 1
+                return false
+            },
             frontmostPID: { pid + 1 },
             pause: {}
         )
-        if !activationRejected { syntheticInputCalls += 1 }
-        let activationGatePassed = activationRejected && syntheticInputCalls == 0
+        let activationGatePassed = activationRejected
+            && rejectedNativeCalls == 1 && rejectedFallbackCalls == 1
+        var nativePhase = 0
+        var nativeFallbackCalls = 0
+        let nativeActivationAccepted = Input.confirmFrontmostActivation(
+            pid: pid,
+            nativeGraceAttempts: 2,
+            fallbackAttempts: 2,
+            nativeActivate: {
+                nativePhase = 1
+                return true
+            },
+            fallbackActivate: {
+                nativeFallbackCalls += 1
+                return true
+            },
+            frontmostPID: { nativePhase == 1 ? pid : pid + 1 },
+            pause: {}
+        )
+        let nativeActivationGracePassed = nativeActivationAccepted && nativeFallbackCalls == 0
+        var fallbackPhase = 0
+        var fallbackCalls = 0
+        let fallbackActivationAccepted = Input.confirmFrontmostActivation(
+            pid: pid,
+            nativeGraceAttempts: 2,
+            fallbackAttempts: 2,
+            nativeActivate: { false },
+            fallbackActivate: {
+                fallbackCalls += 1
+                fallbackPhase = 1
+                return true
+            },
+            frontmostPID: { fallbackPhase == 1 ? pid : pid + 1 },
+            pause: {}
+        )
+        let activationRetryPassed = fallbackActivationAccepted && fallbackCalls == 1
+        let activationScriptScopePassed = Input.activationScriptArguments() == [
+            "-e",
+            "tell application id \"com.apple.ScreenContinuity\" to activate",
+        ]
         let typingFixture = String(repeating: "a", count: 260) + "🙂"
         let typingChunks = Input.textChunks(typingFixture, maximumCharacters: 128)
         let typingChunkingPassed = typingChunks.count == 3
@@ -81,6 +128,87 @@ enum Diagnostics {
         let dependencyPreflightPassed = MirrorCtl.requiresCliclick("open-app")
             && MirrorCtl.requiresCliclick("tap-label-and-capture")
             && !MirrorCtl.requiresCliclick("menu")
+        let reusableOCRMatches: [[String: Any]] = [
+            ["text": "Continue", "cx": 0.5, "cy": 0.72, "confidence": 0.98],
+            ["text": "Cancel", "cx": 0.5, "cy": 0.88, "confidence": 0.99],
+        ]
+        let reusedOCR = OCR.search(
+            matches: reusableOCRMatches,
+            query: "continue",
+            x0: 0.2,
+            y0: 0.6,
+            x1: 0.8,
+            y1: 0.8,
+            limit: 8
+        )
+        let ocrObservationReusePassed = reusedOCR["found"] as? Bool == true
+            && reusedOCR["text"] as? String == "Continue"
+            && reusedOCR["matches"] as? [[String: Any]] != nil
+        func solidSignature(_ rgb: String) -> String {
+            "rgb16:" + String(repeating: rgb, count: VisualComparison.sampleSize * VisualComparison.sampleSize)
+        }
+        let baselineObservation = VisualObservation(
+            signature: solidSignature("000000"),
+            structuralHash: "0000000000000000"
+        )
+        let transientObservation = VisualObservation(
+            signature: solidSignature("ffffff"),
+            structuralHash: "ffffffffffffffff"
+        )
+        let finalObservation = VisualObservation(
+            signature: solidSignature("ff0000"),
+            structuralHash: "aaaaaaaaaaaaaaaa"
+        )
+        let animatedObservation = VisualObservation(
+            signature: solidSignature("0000ff"),
+            structuralHash: "5555555555555555"
+        )
+        var transitionTracker = SettlementTracker(
+            preflight: baselineObservation,
+            maximumSettleMs: 1_000
+        )
+        let transientDecision = try? transitionTracker.observe(transientObservation, elapsedMs: 100)
+        let movingDecision = try? transitionTracker.observe(finalObservation, elapsedMs: 260)
+        let settledDecision = try? transitionTracker.observe(finalObservation, elapsedMs: 450)
+
+        var delayedTracker = SettlementTracker(preflight: baselineObservation, maximumSettleMs: 1_200)
+        let delayedInitial = try? delayedTracker.observe(baselineObservation, elapsedMs: 200)
+        let delayedChange = try? delayedTracker.observe(finalObservation, elapsedMs: 700)
+        let delayedSettled = try? delayedTracker.observe(finalObservation, elapsedMs: 900)
+
+        var localizedBytes = [UInt8](repeating: 0, count: 16 * 16 * 3)
+        localizedBytes[0] = 255
+        localizedBytes[1] = 255
+        localizedBytes[2] = 255
+        let localizedObservation = VisualObservation(
+            signature: "rgb16:" + localizedBytes.map { String(format: "%02x", $0) }.joined(),
+            structuralHash: "000000000000ffff"
+        )
+        var localizedTracker = SettlementTracker(preflight: baselineObservation, maximumSettleMs: 1_000)
+        let localizedDecision = try? localizedTracker.observe(localizedObservation, elapsedMs: 100)
+
+        var unchangedTracker = SettlementTracker(preflight: baselineObservation, maximumSettleMs: 300)
+        let unchangedDecision = try? unchangedTracker.observe(baselineObservation, elapsedMs: 300)
+
+        var animatedTracker = SettlementTracker(preflight: baselineObservation, maximumSettleMs: 500)
+        _ = try? animatedTracker.observe(transientObservation, elapsedMs: 100)
+        _ = try? animatedTracker.observe(finalObservation, elapsedMs: 300)
+        let animatedDecision = try? animatedTracker.observe(animatedObservation, elapsedMs: 500)
+
+        let adaptiveSettlementPassed = transientDecision?.shouldFinish == false
+            && movingDecision?.shouldFinish == false
+            && settledDecision?.screenStable == true
+            && settledDecision?.state == "settled"
+            && delayedInitial?.transitionObserved == false
+            && delayedChange?.screenStable == false
+            && delayedSettled?.screenStable == true
+            && localizedDecision?.transitionObserved == true
+            && (localizedDecision?.visualDistanceFromPreflight ?? 10) < 2
+            && localizedDecision?.structuralHashDistanceFromPreflight == 16
+            && unchangedDecision?.state == "no-change-timeout"
+            && unchangedDecision?.screenChanged == false
+            && animatedDecision?.state == "changed-timeout"
+            && animatedDecision?.screenStable == false
         let parserPassed: Bool
         do {
             let parsed = try MirrorCtl.parseFlags(
@@ -98,13 +226,25 @@ enum Diagnostics {
         } catch {
             parserRejectsInvalid = true
         }
-        let blackSignature = "rgb16:" + String(repeating: "00", count: 16 * 16 * 3)
-        let whiteSignature = "rgb16:" + String(repeating: "ff", count: 16 * 16 * 3)
-        let redSignature = "rgb16:" + String(repeating: "ff0000", count: 16 * 16)
-        let blueSignature = "rgb16:" + String(repeating: "0000ff", count: 16 * 16)
+        let blackSignature = solidSignature("000000")
+        let whiteSignature = solidSignature("ffffff")
+        let redSignature = solidSignature("ff0000")
+        let blueSignature = solidSignature("0000ff")
+        var noiseBytes = [UInt8](repeating: 0, count: 16 * 16 * 3)
+        noiseBytes[0] = 1
+        let noiseObservation = VisualObservation(
+            signature: "rgb16:" + noiseBytes.map { String(format: "%02x", $0) }.joined(),
+            structuralHash: "0000000000000001"
+        )
         let visualComparisonPassed = (try? VisualComparison.distance(blackSignature, whiteSignature)) == 255
             && ((try? VisualComparison.distance(redSignature, blueSignature)) ?? 0)
                 > VisualComparison.materialDifferenceThreshold
+            && (try? VisualComparison.structuralDistance(
+                baselineObservation.structuralHash,
+                localizedObservation.structuralHash
+            )) == 16
+            && (try? VisualComparison.materiallyDifferent(baselineObservation, localizedObservation)) == true
+            && (try? VisualComparison.materiallyDifferent(baselineObservation, noiseObservation)) == false
         let spotlightMatches: [[String: Any]] = [
             ["text": "Settings", "cx": 0.5, "cy": 0.06, "confidence": 0.99],
             ["text": "Settings", "cx": 0.25, "cy": 0.24, "confidence": 0.95],
@@ -158,16 +298,235 @@ enum Diagnostics {
             ["text": "Connection Paused"],
             ["text": "Resume"],
         ]) == "connection_paused"
+        let blockerCases = [
+            ("lock your iphone to connect", "iphone_in_use"),
+            ("iphone in use", "iphone_in_use"),
+            ("icloud signed out", "icloud_signed_out"),
+            ("sign in to icloud to continue", "icloud_signed_out"),
+            ("welcome to iphone mirroring", "setup_required"),
+            ("iphone mirroring not available", "mirroring_unavailable"),
+            ("unable to connect to iphone", "connection_unavailable"),
+            ("connection paused", "connection_paused"),
+        ]
+        func textBox(
+            _ text: String,
+            _ x0: Double,
+            _ y0: Double,
+            _ x1: Double,
+            _ y1: Double
+        ) -> [String: Any] {
+            [
+                "text": text,
+                "bbox": ["x0": x0, "y0": y0, "x1": x1, "y1": y1],
+            ]
+        }
+        let hostBlockerGeometryPassed = blockerCases.allSatisfy { marker, reason in
+            let words = marker.split(separator: " ").map(String.init)
+            let first = words[0]
+            let remainder = words.dropFirst().joined(separator: " ")
+            let single = ScreenPrecondition.blockedReason(from: [["text": marker]]) == reason
+            let adjacent = ScreenPrecondition.blockedReason(from: [
+                textBox(first, 0.10, 0.20, 0.16, 0.24),
+                textBox(remainder, 0.17, 0.20, 0.78, 0.24),
+            ]) == reason
+            let lineWrapped = ScreenPrecondition.blockedReason(from: [
+                textBox(first, 0.15, 0.20, 0.55, 0.24),
+                textBox(remainder, 0.16, 0.25, 0.80, 0.29),
+            ]) == reason
+            let overlappingLineWrapped = ScreenPrecondition.blockedReason(from: [
+                textBox(first, 0.15, 0.20, 0.55, 0.25),
+                textBox(remainder, 0.16, 0.245, 0.80, 0.295),
+            ]) == reason
+            let distant = ScreenPrecondition.blockedReason(from: [
+                textBox(first, 0.10, 0.20, 0.16, 0.24),
+                textBox(remainder, 0.70, 0.20, 0.95, 0.24),
+            ]) == nil
+            let reversed = ScreenPrecondition.blockedReason(from: [
+                textBox(first, 0.60, 0.20, 0.68, 0.24),
+                textBox(remainder, 0.10, 0.20, 0.50, 0.24),
+            ]) == nil
+            let intervening = ScreenPrecondition.blockedReason(from: [
+                textBox(first, 0.10, 0.20, 0.16, 0.24),
+                textBox("Unrelated", 0.17, 0.20, 0.28, 0.24),
+                textBox(remainder, 0.29, 0.20, 0.80, 0.24),
+            ]) == nil
+            let contained = ScreenPrecondition.blockedReason(from: [
+                textBox(first, 0.10, 0.20, 0.90, 0.24),
+                textBox(remainder, 0.20, 0.20, 0.30, 0.24),
+            ]) == nil
+            let unpositioned = ScreenPrecondition.blockedReason(from: [
+                ["text": first],
+                ["text": remainder],
+            ]) == nil
+            return single && adjacent && lineWrapped && overlappingLineWrapped
+                && distant && reversed && intervening && contained && unpositioned
+        }
+        let hostBlockerBoundaryPassed =
+            ScreenPrecondition.blockedReason(from: [
+                textBox("Connection", 0.10, 0.20, 0.30, 0.24),
+                textBox("Paused", 0.2901, 0.20, 0.50, 0.24),
+            ]) == "connection_paused"
+            && ScreenPrecondition.blockedReason(from: [
+                textBox("Connection", 0.10, 0.20, 0.30, 0.24),
+                textBox("Paused", 0.2899, 0.20, 0.50, 0.24),
+            ]) == nil
+            && ScreenPrecondition.blockedReason(from: [
+                textBox("Connection", 0.10, 0.20, 0.30, 0.24),
+                textBox("Paused", 0.3699, 0.20, 0.50, 0.24),
+            ]) == "connection_paused"
+            && ScreenPrecondition.blockedReason(from: [
+                textBox("Connection", 0.10, 0.20, 0.30, 0.24),
+                textBox("Paused", 0.3701, 0.20, 0.50, 0.24),
+            ]) == nil
+            && ScreenPrecondition.blockedReason(from: [
+                textBox("Connection", 0.10, 0.20, 0.50, 0.24),
+                textBox("Paused", 0.10, 0.2301, 0.50, 0.2701),
+            ]) == "connection_paused"
+            && ScreenPrecondition.blockedReason(from: [
+                textBox("Connection", 0.10, 0.20, 0.50, 0.24),
+                textBox("Paused", 0.10, 0.2299, 0.50, 0.2699),
+            ]) == nil
+            && ScreenPrecondition.blockedReason(from: [
+                textBox("Connection", 0.10, 0.20, 0.50, 0.24),
+                textBox("Paused", 0.10, 0.2999, 0.50, 0.3399),
+            ]) == "connection_paused"
+            && ScreenPrecondition.blockedReason(from: [
+                textBox("Connection", 0.10, 0.20, 0.50, 0.24),
+                textBox("Paused", 0.10, 0.3001, 0.50, 0.3401),
+            ]) == nil
+        let malformedGeometryCases: [[[String: Any]]] = [
+            [
+                [
+                    "text": "Connection",
+                    "bbox": ["x0": false, "y0": 0.20, "x1": 0.16, "y1": 0.24],
+                ],
+                textBox("Paused", 0.17, 0.20, 0.40, 0.24),
+            ],
+            [
+                textBox("Connection", 0.10, 0.20, 0.16, 0.24),
+                [
+                    "text": "Paused",
+                    "bbox": ["x0": 0.17, "y0": 0.20, "x1": true, "y1": 0.24],
+                ],
+            ],
+            [
+                [
+                    "text": "Connection",
+                    "bbox": ["x0": 0.10, "y0": false, "x1": 0.16, "y1": 0.04],
+                ],
+                [
+                    "text": "Paused",
+                    "bbox": ["x0": 0.17, "y0": false, "x1": 0.40, "y1": 0.04],
+                ],
+            ],
+            [
+                [
+                    "text": "Connection",
+                    "bbox": ["x0": 0.10, "y0": 0.20, "x1": 0.16, "y1": true],
+                ],
+                [
+                    "text": "Paused",
+                    "bbox": ["x0": 0.17, "y0": 0.20, "x1": 0.40, "y1": true],
+                ],
+            ],
+            [
+                [
+                    "text": "Connection",
+                    "bbox": ["x0": "0.10", "y0": 0.20, "x1": 0.16, "y1": 0.24],
+                ],
+                textBox("Paused", 0.17, 0.20, 0.40, 0.24),
+            ],
+            [
+                [
+                    "text": "Connection",
+                    "bbox": ["x0": Double.nan, "y0": 0.20, "x1": 0.16, "y1": 0.24],
+                ],
+                textBox("Paused", 0.17, 0.20, 0.40, 0.24),
+            ],
+            [
+                ["text": "Connection", "bbox": ["x0": 0.10, "y0": 0.20, "x1": 0.16]],
+                textBox("Paused", 0.17, 0.20, 0.40, 0.24),
+            ],
+            [
+                textBox("Connection", 0.16, 0.20, 0.10, 0.24),
+                textBox("Paused", 0.17, 0.20, 0.40, 0.24),
+            ],
+            [
+                textBox("Connection", -0.10, 0.20, 0.16, 0.24),
+                textBox("Paused", 0.17, 0.20, 0.40, 0.24),
+            ],
+        ]
+        let hostBlockerMalformedGeometryPassed = malformedGeometryCases.allSatisfy {
+            ScreenPrecondition.blockedReason(from: $0) == nil
+        }
+        let hostBlockerFallbackTriggerPassed = ScreenPrecondition.needsAccurateBlockerVerification(from: [
+            ["text": "ConnectbJn"],
+        ]) && !ScreenPrecondition.needsAccurateBlockerVerification(from: [
+            ["text": "Settings"],
+            ["text": "General"],
+            ["text": "Clock"],
+        ])
+        var exactFallbackScans = 0
+        let fastExactResolution = try? MirrorCtl.resolveOCRPasses(
+            fastMatches: [["text": "Connection Paused"]],
+            query: "Missing",
+            accurateScan: {
+                exactFallbackScans += 1
+                return []
+            }
+        )
+        var exactPostActionScans = 0
+        let fastExactPostAction = try? MirrorCtl.resolveOCRPasses(
+            fastMatches: [["text": "Connection Paused"]],
+            query: nil,
+            accurateScan: {
+                exactPostActionScans += 1
+                return []
+            }
+        )
+        let distortedResolution = try? MirrorCtl.resolveOCRPasses(
+            fastMatches: [["text": "ConnxtDn Pau8ed"]],
+            query: nil,
+            accurateScan: { [["text": "Connection Paused"]] }
+        )
+        let falseAlarmResolution = try? MirrorCtl.resolveOCRPasses(
+            fastMatches: [["text": "ConnectbJn"]],
+            query: nil,
+            accurateScan: { [["text": "Settings"]] }
+        )
+        let accurateGeometryResolution = try? MirrorCtl.resolveOCRPasses(
+            fastMatches: [["text": "Other", "cx": 0.1, "cy": 0.1, "confidence": 0.9]],
+            query: "Continue",
+            accurateScan: {
+                [["text": "Continue", "cx": 0.73, "cy": 0.64, "confidence": 0.99]]
+            }
+        )
+        let ocrTwoPassEvidencePassed = exactFallbackScans == 1
+            && fastExactResolution?.blockedReason == "connection_paused"
+            && exactPostActionScans == 0
+            && fastExactPostAction?.accurateScanUsed == false
+            && fastExactPostAction?.blockedReason == "connection_paused"
+            && distortedResolution?.accurateScanUsed == true
+            && distortedResolution?.blockedReason == "connection_paused"
+            && falseAlarmResolution?.accurateScanUsed == true
+            && falseAlarmResolution?.blockedReason == nil
+            && accurateGeometryResolution?.recognitionLevel == "accurate-query-fallback"
+            && (accurateGeometryResolution?.queryResult?["cx"] as? Double) == 0.73
         return [
             "ok": selectionPassed && coordinatesPassed
                 && cliclickCoordinatesPassed && cliclickEdgesPassed && explicitTapTargetPassed
                 && pointerGuardPassed && midScrollAbortPassed && activationGatePassed
-                && typingChunkingPassed && dependencyPreflightPassed
+                && nativeActivationGracePassed && activationRetryPassed
+                && activationScriptScopePassed
+                && typingChunkingPassed && dependencyPreflightPassed && ocrObservationReusePassed
+                && adaptiveSettlementPassed
                 && parserPassed && parserRejectsInvalid && visualComparisonPassed
                 && spotlightSelectionPassed && spotlightEntryPassed
                 && normalizedRemapPassed && preparedWindowIdentityPassed
                 && timeoutIsolationPassed && windowCaptureFallbackPassed
-                && hostBlockerPassed,
+                && hostBlockerPassed && hostBlockerGeometryPassed && hostBlockerBoundaryPassed
+                && hostBlockerMalformedGeometryPassed
+                && hostBlockerFallbackTriggerPassed && ocrTwoPassEvidencePassed,
             "windowSelection": selectionPassed,
             "coordinateRoundTrip": coordinatesPassed,
             "cliclickNegativeCoordinates": cliclickCoordinatesPassed,
@@ -176,8 +535,13 @@ enum Diagnostics {
             "midActionPointerGuard": pointerGuardPassed,
             "midScrollAbort": midScrollAbortPassed,
             "activationGate": activationGatePassed,
+            "activationNativeGrace": nativeActivationGracePassed,
+            "activationRetry": activationRetryPassed,
+            "activationScriptScope": activationScriptScopePassed,
             "typingChunking": typingChunkingPassed,
             "dependencyPreflight": dependencyPreflightPassed,
+            "ocrObservationReuse": ocrObservationReusePassed,
+            "adaptiveSettlement": adaptiveSettlementPassed,
             "argumentParser": parserPassed,
             "argumentParserRejectsInvalid": parserRejectsInvalid,
             "visualComparison": visualComparisonPassed,
@@ -188,6 +552,11 @@ enum Diagnostics {
             "captureTimeoutIsolation": timeoutIsolationPassed,
             "windowOnlyCaptureFallback": windowCaptureFallbackPassed,
             "hostBlockerDetection": hostBlockerPassed,
+            "hostBlockerGeometryGrouping": hostBlockerGeometryPassed,
+            "hostBlockerGeometryBoundaries": hostBlockerBoundaryPassed,
+            "hostBlockerMalformedGeometry": hostBlockerMalformedGeometryPassed,
+            "hostBlockerFallbackTrigger": hostBlockerFallbackTriggerPassed,
+            "ocrTwoPassEvidence": ocrTwoPassEvidencePassed,
             "selectedWindowId": selected.map { Int($0.windowId) } ?? -1,
         ]
     }

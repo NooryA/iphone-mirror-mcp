@@ -4,6 +4,7 @@ import pytest
 from PIL import Image
 
 from iphone_mirror_mcp.screen import (
+    annotate_screenshot,
     blocked_reason_from_ocr,
     detect_iphone_in_use,
     find_pixels,
@@ -76,6 +77,19 @@ def test_sha256_changes_when_pixels_change(tmp_path: Path) -> None:
     Image.new("RGB", (8, 8), (0, 0, 0)).save(a)
     Image.new("RGB", (8, 8), (1, 0, 0)).save(b)
     assert sha256_file(str(a)) != sha256_file(str(b))
+
+
+def test_annotation_preserves_native_host_state(tmp_path: Path) -> None:
+    path = tmp_path / "blocked.png"
+    Image.new("RGB", (32, 64), (20, 40, 60)).save(path)
+    result = {"iphoneInUse": True, "interactionBlocked": True, "blockedReason": "iphone_in_use"}
+
+    annotate_screenshot(result, str(path))
+
+    assert result["iphoneInUse"] is True
+    assert result["interactionBlocked"] is True
+    assert result["blockedReason"] == "iphone_in_use"
+    assert result["sha256"] == sha256_file(str(path))
 
 
 def test_visual_hash_ignores_tiny_noise_but_detects_screen_change(tmp_path: Path) -> None:
@@ -173,4 +187,167 @@ def test_connection_paused_is_a_host_blocker() -> None:
 
 def test_ordinary_iphone_ui_is_not_a_host_blocker() -> None:
     matches = [{"text": "Settings"}, {"text": "Sign in to your iPhone"}]
+    assert blocked_reason_from_ocr(matches, iphone_in_use=False) is None
+
+
+_MULTI_OBSERVATION_BLOCKERS = (
+    ("lock your iphone to connect", "iphone_in_use"),
+    ("iphone in use", "iphone_in_use"),
+    ("icloud signed out", "icloud_signed_out"),
+    ("sign in to icloud to continue", "icloud_signed_out"),
+    ("welcome to iphone mirroring", "setup_required"),
+    ("iphone mirroring not available", "mirroring_unavailable"),
+    ("unable to connect to iphone", "connection_unavailable"),
+    ("connection paused", "connection_paused"),
+)
+
+
+def _ocr_box(text: str, x0: float, y0: float, x1: float, y1: float) -> dict[str, object]:
+    return {"text": text, "bbox": {"x0": x0, "y0": y0, "x1": x1, "y1": y1}}
+
+
+@pytest.mark.parametrize(("marker", "reason"), _MULTI_OBSERVATION_BLOCKERS)
+def test_blocked_reason_accepts_single_adjacent_and_line_wrapped_phrases(marker: str, reason: str) -> None:
+    first, remainder = marker.split(" ", 1)
+    single = [{"text": marker}]
+    adjacent = [
+        _ocr_box(first, 0.10, 0.20, 0.16, 0.24),
+        _ocr_box(remainder, 0.17, 0.20, 0.78, 0.24),
+    ]
+    line_wrapped = [
+        _ocr_box(first, 0.15, 0.20, 0.55, 0.24),
+        _ocr_box(remainder, 0.16, 0.25, 0.80, 0.29),
+    ]
+    overlapping_line_wrapped = [
+        _ocr_box(first, 0.15, 0.20, 0.55, 0.25),
+        _ocr_box(remainder, 0.16, 0.245, 0.80, 0.295),
+    ]
+
+    assert blocked_reason_from_ocr(single, iphone_in_use=False) == reason
+    assert blocked_reason_from_ocr(adjacent, iphone_in_use=False) == reason
+    assert blocked_reason_from_ocr(line_wrapped, iphone_in_use=False) == reason
+    assert blocked_reason_from_ocr(overlapping_line_wrapped, iphone_in_use=False) == reason
+
+
+@pytest.mark.parametrize(("marker", "_reason"), _MULTI_OBSERVATION_BLOCKERS)
+def test_blocked_reason_rejects_unrelated_phrase_fragments(marker: str, _reason: str) -> None:
+    first, remainder = marker.split(" ", 1)
+    distant = [
+        _ocr_box(first, 0.10, 0.20, 0.16, 0.24),
+        _ocr_box(remainder, 0.70, 0.20, 0.95, 0.24),
+    ]
+    reversed_order = [
+        _ocr_box(first, 0.60, 0.20, 0.68, 0.24),
+        _ocr_box(remainder, 0.10, 0.20, 0.50, 0.24),
+    ]
+    intervening = [
+        _ocr_box(first, 0.10, 0.20, 0.16, 0.24),
+        _ocr_box("Unrelated", 0.17, 0.20, 0.28, 0.24),
+        _ocr_box(remainder, 0.29, 0.20, 0.80, 0.24),
+    ]
+    contained = [
+        _ocr_box(first, 0.10, 0.20, 0.90, 0.24),
+        _ocr_box(remainder, 0.20, 0.20, 0.30, 0.24),
+    ]
+    unpositioned = [{"text": first}, {"text": remainder}]
+
+    assert blocked_reason_from_ocr(distant, iphone_in_use=False) is None
+    assert blocked_reason_from_ocr(reversed_order, iphone_in_use=False) is None
+    assert blocked_reason_from_ocr(intervening, iphone_in_use=False) is None
+    assert blocked_reason_from_ocr(contained, iphone_in_use=False) is None
+    assert blocked_reason_from_ocr(unpositioned, iphone_in_use=False) is None
+
+
+def test_blocked_reason_geometry_threshold_boundaries() -> None:
+    horizontal_overlap_inside = [
+        _ocr_box("Connection", 0.10, 0.20, 0.30, 0.24),
+        _ocr_box("Paused", 0.2901, 0.20, 0.50, 0.24),
+    ]
+    horizontal_overlap_outside = [
+        _ocr_box("Connection", 0.10, 0.20, 0.30, 0.24),
+        _ocr_box("Paused", 0.2899, 0.20, 0.50, 0.24),
+    ]
+    horizontal_gap_inside = [
+        _ocr_box("Connection", 0.10, 0.20, 0.30, 0.24),
+        _ocr_box("Paused", 0.3699, 0.20, 0.50, 0.24),
+    ]
+    horizontal_gap_outside = [
+        _ocr_box("Connection", 0.10, 0.20, 0.30, 0.24),
+        _ocr_box("Paused", 0.3701, 0.20, 0.50, 0.24),
+    ]
+    vertical_overlap_inside = [
+        _ocr_box("Connection", 0.10, 0.20, 0.50, 0.24),
+        _ocr_box("Paused", 0.10, 0.2301, 0.50, 0.2701),
+    ]
+    vertical_overlap_outside = [
+        _ocr_box("Connection", 0.10, 0.20, 0.50, 0.24),
+        _ocr_box("Paused", 0.10, 0.2299, 0.50, 0.2699),
+    ]
+    vertical_gap_inside = [
+        _ocr_box("Connection", 0.10, 0.20, 0.50, 0.24),
+        _ocr_box("Paused", 0.10, 0.2999, 0.50, 0.3399),
+    ]
+    vertical_gap_outside = [
+        _ocr_box("Connection", 0.10, 0.20, 0.50, 0.24),
+        _ocr_box("Paused", 0.10, 0.3001, 0.50, 0.3401),
+    ]
+
+    for inside in (
+        horizontal_overlap_inside,
+        horizontal_gap_inside,
+        vertical_overlap_inside,
+        vertical_gap_inside,
+    ):
+        assert blocked_reason_from_ocr(inside, iphone_in_use=False) == "connection_paused"
+    for outside in (
+        horizontal_overlap_outside,
+        horizontal_gap_outside,
+        vertical_overlap_outside,
+        vertical_gap_outside,
+    ):
+        assert blocked_reason_from_ocr(outside, iphone_in_use=False) is None
+
+
+@pytest.mark.parametrize(
+    "matches",
+    (
+        [
+            {"text": "Connection", "bbox": {"x0": False, "y0": 0.20, "x1": 0.16, "y1": 0.24}},
+            _ocr_box("Paused", 0.17, 0.20, 0.40, 0.24),
+        ],
+        [
+            _ocr_box("Connection", 0.10, 0.20, 0.16, 0.24),
+            {"text": "Paused", "bbox": {"x0": 0.17, "y0": 0.20, "x1": True, "y1": 0.24}},
+        ],
+        [
+            {"text": "Connection", "bbox": {"x0": 0.10, "y0": False, "x1": 0.16, "y1": 0.04}},
+            {"text": "Paused", "bbox": {"x0": 0.17, "y0": False, "x1": 0.40, "y1": 0.04}},
+        ],
+        [
+            {"text": "Connection", "bbox": {"x0": 0.10, "y0": 0.20, "x1": 0.16, "y1": True}},
+            {"text": "Paused", "bbox": {"x0": 0.17, "y0": 0.20, "x1": 0.40, "y1": True}},
+        ],
+        [
+            {"text": "Connection", "bbox": {"x0": "0.10", "y0": 0.20, "x1": 0.16, "y1": 0.24}},
+            _ocr_box("Paused", 0.17, 0.20, 0.40, 0.24),
+        ],
+        [
+            {"text": "Connection", "bbox": {"x0": float("nan"), "y0": 0.20, "x1": 0.16, "y1": 0.24}},
+            _ocr_box("Paused", 0.17, 0.20, 0.40, 0.24),
+        ],
+        [
+            {"text": "Connection", "bbox": {"x0": 0.10, "y0": 0.20, "x1": 0.16}},
+            _ocr_box("Paused", 0.17, 0.20, 0.40, 0.24),
+        ],
+        [
+            _ocr_box("Connection", 0.16, 0.20, 0.10, 0.24),
+            _ocr_box("Paused", 0.17, 0.20, 0.40, 0.24),
+        ],
+        [
+            _ocr_box("Connection", -0.10, 0.20, 0.16, 0.24),
+            _ocr_box("Paused", 0.17, 0.20, 0.40, 0.24),
+        ],
+    ),
+)
+def test_blocked_reason_rejects_malformed_split_geometry(matches: list[dict[str, object]]) -> None:
     assert blocked_reason_from_ocr(matches, iphone_in_use=False) is None

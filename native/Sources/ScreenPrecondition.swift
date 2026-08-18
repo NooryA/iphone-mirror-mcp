@@ -1,14 +1,17 @@
 import CryptoKit
+import CoreFoundation
 import Foundation
 
 struct ScreenPreconditionState {
     let sha256: String
     let visualSignature: String
+    let structuralHash: String
     let windowId: UInt32
     let visualDistance: Double?
     let window: MirrorWindow
     let capture: [String: Any]
     let imageData: Data
+    let ocrMatches: [[String: Any]]
 
     var json: [String: Any] {
         var result: [String: Any] = [
@@ -24,6 +27,38 @@ struct ScreenPreconditionState {
 }
 
 enum ScreenPrecondition {
+    // Vision boxes for neighboring glyph runs can overlap slightly. Bound that tolerance by
+    // text height so genuine splits join without accepting nested or duplicate observations.
+    private static let maximumAdjacentBoxOverlapScale = 0.25
+
+    private struct PositionedText {
+        let text: String
+        let x0: Double
+        let y0: Double
+        let x1: Double
+        let y1: Double
+
+        var centerY: Double { (y0 + y1) / 2 }
+        var height: Double { y1 - y0 }
+    }
+
+    private struct TextLine {
+        var items: [PositionedText]
+
+        var centerY: Double {
+            items.map(\.centerY).reduce(0, +) / Double(items.count)
+        }
+
+        var meanHeight: Double {
+            items.map(\.height).reduce(0, +) / Double(items.count)
+        }
+
+        var x0: Double { items.map(\.x0).min() ?? 0 }
+        var x1: Double { items.map(\.x1).max() ?? 0 }
+        var y0: Double { items.map(\.y0).min() ?? 0 }
+        var y1: Double { items.map(\.y1).max() ?? 0 }
+    }
+
     private static let blockedMarkers: [(marker: String, reason: String)] = [
         ("lock your iphone to connect", "iphone_in_use"),
         ("iphone in use", "iphone_in_use"),
@@ -48,17 +83,9 @@ enum ScreenPrecondition {
         let capture = try Capture.screenshot(window: window, to: currentURL.path)
         let data = try Data(contentsOf: currentURL)
         let actual = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        let signature = try VisualComparison.signature(at: currentURL)
-        let ocr = try OCR.recognize(
-            imageAt: currentURL.path,
-            query: "",
-            x0: 0,
-            y0: 0,
-            x1: 1,
-            y1: 1,
-            limit: 32
-        )
-        if let blockedReason = blockedReason(from: ocr["matches"] as? [[String: Any]] ?? []) {
+        let visual = try VisualComparison.observation(at: currentURL)
+        let ocrMatches = try OCR.scan(imageAt: currentURL.path)
+        if let blockedReason = blockedReason(from: ocrMatches) {
             throw MirrorError.invalidArgs(
                 "interaction blocked by iPhone Mirroring host state: \(blockedReason)"
             )
@@ -91,12 +118,14 @@ enum ScreenPrecondition {
         }
         return ScreenPreconditionState(
             sha256: actual,
-            visualSignature: signature,
+            visualSignature: visual.signature,
+            structuralHash: visual.structuralHash,
             windowId: windowId,
             visualDistance: visualDistance,
             window: window,
             capture: capture,
-            imageData: data
+            imageData: data,
+            ocrMatches: ocrMatches
         )
     }
 
@@ -111,12 +140,135 @@ enum ScreenPrecondition {
     }
 
     static func blockedReason(from matches: [[String: Any]]) -> String? {
-        let text = matches
+        let normalizedTexts = matches.compactMap { match -> String? in
+            guard let text = match["text"] as? String else { return nil }
+            let normalized = normalize(text)
+            return normalized.isEmpty ? nil : normalized
+        }
+        for text in normalizedTexts {
+            if let reason = reason(in: text) { return reason }
+        }
+
+        // Vision normally returns a whole line as one observation. When it splits a warning,
+        // only combine observations that are adjacent in geometric reading order. Blindly
+        // joining every OCR result can turn unrelated labels such as distant "Connection" and
+        // "Paused" controls into a host warning and incorrectly reject all input.
+        for run in adjacentTextRuns(from: matches) {
+            if let reason = reason(in: run.map(\.text).joined(separator: " ")) {
+                return reason
+            }
+        }
+        return nil
+    }
+
+    private static func normalize(_ text: String) -> String {
+        text.lowercased()
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+    }
+
+    private static func reason(in text: String) -> String? {
+        blockedMarkers.first(where: { text.contains($0.marker) })?.reason
+    }
+
+    private static func adjacentTextRuns(from matches: [[String: Any]]) -> [[PositionedText]] {
+        let positioned = matches.compactMap(positionedText)
+            .sorted {
+                if $0.centerY != $1.centerY { return $0.centerY < $1.centerY }
+                return $0.x0 < $1.x0
+            }
+        var lines: [TextLine] = []
+        for item in positioned {
+            if !lines.isEmpty,
+               abs(item.centerY - lines[lines.count - 1].centerY)
+                   <= 0.6 * max(item.height, lines[lines.count - 1].meanHeight) {
+                lines[lines.count - 1].items.append(item)
+            } else {
+                lines.append(TextLine(items: [item]))
+            }
+        }
+        for index in lines.indices {
+            lines[index].items.sort { $0.x0 < $1.x0 }
+        }
+
+        var runs: [[PositionedText]] = []
+        var previousLine: TextLine?
+        for line in lines {
+            var segments: [[PositionedText]] = []
+            for item in line.items {
+                if let previous = segments.last?.last,
+                   horizontallyAdjacent(previous, item) {
+                    segments[segments.count - 1].append(item)
+                } else {
+                    segments.append([item])
+                }
+            }
+            if let previousLine, wrapsFrom(previousLine, to: line),
+               !runs.isEmpty, !segments.isEmpty {
+                runs[runs.count - 1].append(contentsOf: segments.removeFirst())
+            }
+            runs.append(contentsOf: segments)
+            previousLine = line
+        }
+        return runs
+    }
+
+    private static func positionedText(_ match: [String: Any]) -> PositionedText? {
+        guard let text = match["text"] as? String,
+              let box = match["bbox"] as? [String: Any],
+              let x0 = numericCoordinate(box["x0"]),
+              let y0 = numericCoordinate(box["y0"]),
+              let x1 = numericCoordinate(box["x1"]),
+              let y1 = numericCoordinate(box["y1"]),
+              x0.isFinite, y0.isFinite, x1.isFinite, y1.isFinite,
+              x0 >= 0, y0 >= 0, x1 <= 1, y1 <= 1,
+              x0 < x1, y0 < y1 else { return nil }
+        let normalized = normalize(text)
+        guard !normalized.isEmpty else { return nil }
+        return PositionedText(text: normalized, x0: x0, y0: y0, x1: x1, y1: y1)
+    }
+
+    private static func numericCoordinate(_ value: Any?) -> Double? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        return number.doubleValue
+    }
+
+    private static func horizontallyAdjacent(_ left: PositionedText, _ right: PositionedText) -> Bool {
+        let minimumGap = -maximumAdjacentBoxOverlapScale * min(left.height, right.height)
+        let maximumGap = max(0.015, 1.75 * max(left.height, right.height))
+        let gap = right.x0 - left.x1
+        return gap >= minimumGap && gap <= maximumGap
+    }
+
+    private static func wrapsFrom(_ upper: TextLine, to lower: TextLine) -> Bool {
+        guard lower.centerY > upper.centerY else { return false }
+        let minimumVerticalGap = -maximumAdjacentBoxOverlapScale
+            * min(upper.meanHeight, lower.meanHeight)
+        let maximumVerticalGap = max(0.02, 1.5 * max(upper.meanHeight, lower.meanHeight))
+        let verticalGap = lower.y0 - upper.y1
+        guard verticalGap >= minimumVerticalGap,
+              verticalGap <= maximumVerticalGap else { return false }
+
+        let maximumHorizontalGap = max(0.03, 2 * max(upper.meanHeight, lower.meanHeight))
+        return lower.x0 <= upper.x1 + maximumHorizontalGap
+            && lower.x1 >= upper.x0 - maximumHorizontalGap
+    }
+
+    static func needsAccurateBlockerVerification(from matches: [[String: Any]]) -> Bool {
+        let words = matches
             .compactMap { $0["text"] as? String }
             .joined(separator: " ")
             .lowercased()
-            .split(whereSeparator: { $0.isWhitespace })
-            .joined(separator: " ")
-        return blockedMarkers.first(where: { text.contains($0.marker) })?.reason
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        return words.contains { word in
+            word.hasPrefix("conn")
+                || word.hasPrefix("pau")
+                || word == "unable"
+                || word == "lock"
+                || word.hasPrefix("icloud")
+                || word.hasPrefix("mirror")
+                || word.hasPrefix("welcome")
+        }
     }
 }
