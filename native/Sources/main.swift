@@ -43,6 +43,7 @@ enum MirrorCtl {
             let flags = try parseFlags(Array(args.dropFirst()), allowed: allowed)
             let result: [String: Any]
             if inputCommands.contains(command) {
+                try validateInputArguments(command, flags: flags)
                 let lock = try ActionLock()
                 result = try withExtendedLifetime(lock) {
                     let preflight = try ScreenPrecondition.verify(
@@ -59,6 +60,92 @@ enum MirrorCtl {
             JSONOut.print(result)
         } catch {
             JSONOut.fail(error)
+        }
+    }
+
+    /// Reject malformed and intentionally unsupported input without requiring a live phone window.
+    /// The same validated flags are then executed under the native action lock and screen preflight.
+    static func validateInputArguments(_ command: String, flags: [String: String]) throws {
+        switch command {
+        case "tap", "tap-normalized", "tap-and-capture":
+            let inputMode = try mode(flags["mode"], default: .skylight)
+            guard inputMode != .background else {
+                throw MirrorError.invalidArgs(
+                    "background tap events are not delivered to iOS; use hid or skylight"
+                )
+            }
+            guard let x = finiteDouble(flags["x"]), let y = finiteDouble(flags["y"]) else {
+                throw MirrorError.invalidArgs("\(command) requires finite --x and --y")
+            }
+            if command != "tap", !(0...1).contains(x) || !(0...1).contains(y) {
+                throw MirrorError.invalidArgs(
+                    "normalized coordinates must be finite values between 0 and 1"
+                )
+            }
+            if command == "tap-and-capture" {
+                guard flags["out"] != nil else {
+                    throw MirrorError.invalidArgs("tap-and-capture requires finite --x --y and --out")
+                }
+                _ = try strictInt(
+                    flags["settle-ms"],
+                    default: 300,
+                    minimum: 0,
+                    maximum: 10_000,
+                    name: "settle-ms"
+                )
+            }
+        case "swipe":
+            throw MirrorError.invalidArgs(
+                "drag swipes are not delivered to iOS by iPhone Mirroring; use scroll instead"
+            )
+        case "scroll", "scroll-normalized":
+            guard let x = finiteDouble(flags["x"]), let y = finiteDouble(flags["y"]) else {
+                throw MirrorError.invalidArgs("\(command) requires finite --x and --y")
+            }
+            if command == "scroll-normalized", !(0...1).contains(x) || !(0...1).contains(y) {
+                throw MirrorError.invalidArgs(
+                    "normalized coordinates must be finite values between 0 and 1"
+                )
+            }
+            _ = try strictInt(flags["delta"], default: -12, minimum: -120, maximum: 120, name: "delta")
+            _ = try strictInt(flags["ticks"], default: 8, minimum: 1, maximum: 40, name: "ticks")
+        case "type":
+            let inputMode = try mode(flags["mode"], default: .hid)
+            guard inputMode != .background else {
+                throw MirrorError.invalidArgs(
+                    "background text events are not delivered to iOS; use hid or skylight"
+                )
+            }
+            guard let text = flags["text"] else {
+                throw MirrorError.invalidArgs("type requires --text")
+            }
+            guard !text.isEmpty, text.count <= 4_000 else {
+                throw MirrorError.invalidArgs("text length must be between 1 and 4000 characters")
+            }
+            guard !text.contains("\n"), !text.contains("\r") else {
+                throw MirrorError.invalidArgs(
+                    "text must be a single line; named Return events are not delivered to iOS"
+                )
+            }
+        case "key":
+            throw MirrorError.invalidArgs(
+                "named key events are not delivered to iOS by iPhone Mirroring; use type_text for text"
+            )
+        case "menu":
+            guard let action = flags["action"], ["home", "app_switcher", "spotlight"].contains(action) else {
+                throw MirrorError.invalidArgs("unknown menu action: \(flags["action"] ?? "")")
+            }
+        case "open-app":
+            guard let rawName = flags["name"] else {
+                throw MirrorError.invalidArgs("open-app requires --name")
+            }
+            let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty, name.count <= 200,
+                  !name.contains("\n"), !name.contains("\r") else {
+                throw MirrorError.invalidArgs("app name must be 1-200 characters on one line")
+            }
+        default:
+            throw MirrorError.invalidArgs("unknown input command: \(command)")
         }
     }
 
@@ -231,6 +318,20 @@ enum MirrorCtl {
     ) -> Int {
         guard let raw, let value = Int(raw) else { return defaultValue }
         return min(maximum, max(minimum, value))
+    }
+
+    static func strictInt(
+        _ raw: String?,
+        default defaultValue: Int,
+        minimum: Int,
+        maximum: Int,
+        name: String
+    ) throws -> Int {
+        guard let raw else { return defaultValue }
+        guard let value = Int(raw), value >= minimum, value <= maximum else {
+            throw MirrorError.invalidArgs("--\(name) must be an integer between \(minimum) and \(maximum)")
+        }
+        return value
     }
 
     static func mode(_ raw: String?, default defaultMode: InputMode) throws -> InputMode {

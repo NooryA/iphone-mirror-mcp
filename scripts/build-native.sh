@@ -40,11 +40,27 @@ HASH="$({
   printf '%s\n' "${COMPILER_ARGS[@]}"
   shasum -a 256 "$0" "${SOURCES[@]}"
 } | shasum -a 256 | awk '{print $1}')"
-if [[ -x "$OUT" && -f "$HASH_FILE" && "$(cat "$HASH_FILE")" == "$HASH" ]]; then
-  exit 0
+if [[ -x "$OUT" && -f "$HASH_FILE" ]]; then
+  read -r CACHED_SOURCE_HASH CACHED_BINARY_HASH < "$HASH_FILE" || true
+  CURRENT_BINARY_HASH="$(shasum -a 256 "$OUT" | awk '{print $1}')"
+  if [[ "$CACHED_SOURCE_HASH" == "$HASH" && "$CACHED_BINARY_HASH" == "$CURRENT_BINARY_HASH" ]]; then
+    exit 0
+  fi
 fi
 
-swiftc "${COMPILER_ARGS[@]}" -o "$OUT" "${SOURCES[@]}"
+TEMP_OUT="$(mktemp "${OUT}.tmp.XXXXXX")"
+TEMP_HASH="$(mktemp "${HASH_FILE}.tmp.XXXXXX")"
+cleanup() {
+  rm -f "$TEMP_OUT" "$TEMP_HASH"
+}
+trap cleanup EXIT
 
-codesign --force --sign - "$OUT" >/dev/null
-echo "$HASH" > "$HASH_FILE"
+swiftc "${COMPILER_ARGS[@]}" -o "$TEMP_OUT" "${SOURCES[@]}"
+
+codesign --force --sign - "$TEMP_OUT" >/dev/null
+BINARY_HASH="$(shasum -a 256 "$TEMP_OUT" | awk '{print $1}')"
+printf '%s %s\n' "$HASH" "$BINARY_HASH" > "$TEMP_HASH"
+mv -f "$TEMP_OUT" "$OUT"
+mv -f "$TEMP_HASH" "$HASH_FILE"
+
+trap - EXIT

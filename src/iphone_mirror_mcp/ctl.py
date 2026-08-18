@@ -51,24 +51,23 @@ def _native_binary() -> Path:
     lock_path = target_dir / "build.lock"
     with lock_path.open("a+b") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        if not target.is_file():
-            env = os.environ.copy()
-            env["MIRROR_NATIVE_SRC"] = str(sources)
-            env["MIRROR_NATIVE_OUT"] = str(target)
-            try:
-                built = subprocess.run(
-                    ["/bin/bash", str(builder)],
-                    capture_output=True,
-                    text=True,
-                    timeout=180,
-                    check=False,
-                    env=env,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise MirrorCtlError("native helper build timed out after 180 seconds") from exc
-            if built.returncode != 0 or not target.is_file():
-                detail = (built.stderr or built.stdout or "unknown build failure").strip()
-                raise MirrorCtlError(f"could not build the native helper: {detail[:800]}")
+        env = os.environ.copy()
+        env["MIRROR_NATIVE_SRC"] = str(sources)
+        env["MIRROR_NATIVE_OUT"] = str(target)
+        try:
+            built = subprocess.run(
+                ["/bin/bash", str(builder)],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                check=False,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise MirrorCtlError("native helper build timed out after 180 seconds") from exc
+        if built.returncode != 0 or not target.is_file() or not os.access(target, os.X_OK):
+            detail = (built.stderr or built.stdout or "unknown build failure").strip()
+            raise MirrorCtlError(f"could not build the native helper: {detail[:800]}")
     return target
 
 

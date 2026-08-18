@@ -47,7 +47,9 @@ uv sync
 
 The wheel contains portable Swift source instead of an architecture-specific executable. On its first tool
 call, the installed package compiles and ad-hoc-signs `mirror-ctl` into the user cache for the current macOS
-architecture. Xcode Command Line Tools are therefore still required.
+architecture. Later calls verify both the source/build hash and cached binary integrity; rebuilds use an atomic
+replacement so interrupted compilation cannot leave a partial helper. Xcode Command Line Tools are therefore
+still required.
 
 ```bash
 uv build

@@ -31,7 +31,8 @@
 - Preserve arbitrary leading-dash and Unicode CLI values while rejecting unknown, duplicate, and missing flags.
 - Return explicit MCP image content plus structured metadata and exercise every image-tool family over stdio.
 - Isolate timed-out ScreenCaptureKit work from the fallback destination to prevent late-writer races.
-- Bundle native source in wheels and compile a signed, architecture-specific helper into the user cache on first use.
+- Bundle native source in wheels and atomically compile a signed, integrity-checked, architecture-specific helper
+  into the user cache on first use.
 - Keep the Python package and distribution version synchronized.
 - Remove the unused private SkyLight framework event path while retaining the `skylight` mode name for compatibility.
 - Remove screenshot temporary files deterministically.
