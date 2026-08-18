@@ -1,9 +1,16 @@
 import Foundation
 import ApplicationServices
+import AppKit
 
 enum MenuControl {
-    static func invoke(_ action: String) throws -> [String: Any] {
+    static func invoke(_ action: String, expectedWindowId: UInt32? = nil) throws -> [String: Any] {
         let win = try WindowFinder.find()
+        if let expectedWindowId, win.windowId != expectedWindowId {
+            throw MirrorError.invalidArgs("iPhone Mirroring window changed after preflight; no command was sent")
+        }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == win.pid else {
+            throw MirrorError.invalidArgs("iPhone Mirroring focus changed after preflight; no command was sent")
+        }
         let title: String
         switch action {
         case "home":

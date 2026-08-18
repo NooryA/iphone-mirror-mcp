@@ -156,7 +156,7 @@ Tap the phone screen. Prefer `tap_and_see` when you need to confirm the UI chang
 
 Default `skylight` is the backwards-compatible mode name for an overlay plus the proven `cliclick` backend. `hid` uses `cliclick` without the overlay. Both restore the Mac pointer unless real user movement is detected. `background` is retained for API compatibility but fails closed because `CGEvent.postToPid` does not deliver input to iOS.
 
-Screenshots include both a difference-based `visualHash` and a versioned absolute-color `visualSignature`. Change detection combines them so tiny live-video noise is ignored without treating black, white, or equal-luminance color screens as identical. `tap_label` keeps its OCR source frame alive and the native helper compares it with a fresh frame while holding the cross-process input lock. For byte-for-byte state-sensitive actions, pass the `sha256` from the screenshot used to choose the target.
+Screenshots include both a difference-based `visualHash` and a versioned absolute-color `visualSignature`. Change detection combines them so tiny live-video noise is ignored without treating black, white, or equal-luminance color screens as identical. `tap_label` performs its fresh capture, host check, OCR target selection, tap, settlement, and result capture inside one native cross-process lock. For byte-for-byte state-sensitive actions, pass the `sha256` from the screenshot used to choose the target.
 
 ### `tap_and_see`
 
@@ -190,7 +190,7 @@ Screenshot + on-device Vision OCR. Returns the 0–1 centroid of the best match.
 
 ### `tap_label`
 
-`find_text` then tap the match and screenshot. One round-trip to click a visible row or button.
+Freshly capture and OCR the query, derive its normalized point, tap it, and return the resulting screenshot. The entire operation runs under one native input lock, so a coordinate selected before the lock is never trusted.
 
 ### `scroll`
 
@@ -219,7 +219,7 @@ This compatibility tool now fails closed with an actionable error: macOS reports
 
 ### `type_text`
 
-Type a single line into the focused iOS field. Newlines are rejected because synthetic Return events do not reach iOS reliably.
+Type a single line into the focused iOS field. Long values are sent in bounded chunks, with the exact mirror window and frontmost application rechecked between chunks. Newlines are rejected because synthetic Return events do not reach iOS reliably.
 
 ### `press_key` / `press_return`
 
@@ -296,9 +296,16 @@ The Swift helper lives in `native/Sources/` and compiles to `dist/mirror-ctl`. T
 - Clicks outside the mirroring window are refused
 - Out-of-range and non-finite normalized coordinates are rejected, not clamped into an accidental edge click
 - Global input is serialized across helper processes and MCP clients
-- Host-state validation, fresh normalized-coordinate mapping, and supported input run in one native lock transaction
+- Under one native lock, the helper activates and resolves the mirror first, then captures/preflights that exact
+  window and verifies the same window identity immediately before supported input
+- iPhone Mirroring must be confirmed frontmost immediately before global input; taps use explicit absolute targets,
+  and scrolling aborts before its next tick if focus or pointer ownership changes
+- `cliclick` readiness is checked before activation or View-menu changes for commands that depend on it
+- Both screenshot backends capture the resolved iPhone Mirroring window ID, not a composited display rectangle
+- Timed-out native/build helpers are terminated and reaped as a process group, so child input/compiler processes
+  cannot continue after the MCP reports failure
 - Optional screenshot SHA-256 preconditions block stale-screen actions
-- Absolute-color signatures plus structural hashes protect OCR label taps without missing flat/color-only transitions
+- Absolute-color signatures plus structural hashes detect material changes without missing flat/color-only transitions
 - Known host blocking screens such as **iPhone in Use**, **iCloud Signed Out**, and setup/unavailable states are detected before input
 - Pointer restoration does not overwrite user movement detected during a pointer action
 - No arbitrary shell

@@ -53,6 +53,12 @@ MAX_VISUAL_SIGNATURE_DISTANCE = 6.0
 
 ImageToolResult = Annotated[CallToolResult, dict[str, Any]]
 
+
+def _typing_timeout(text: str) -> float:
+    """Leave room for bounded native chunks while retaining an outer process-group deadline."""
+    return max(20.0, 15.0 + len(text) * 0.05)
+
+
 READ_ONLY_TOOL = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,
@@ -265,13 +271,10 @@ def _tap_and_see(
     settle_ms: int,
     *,
     expected_sha256: str | None = None,
-    expected_image_path: str | None = None,
-    ocr_metadata: dict[str, Any] | None = None,
 ) -> CallToolResult:
     settle = _bounded_int(settle_ms, name="settle_ms", minimum=0, maximum=MAX_SETTLE_MS)
     nx = _bounded_number(x, name="x", minimum=0, maximum=1)
     ny = _bounded_number(y, name="y", minimum=0, maximum=1)
-    expected_image_args = ("--expected-image", expected_image_path) if expected_image_path else ()
     with _output_file() as path:
         result = run_ctl(
             "tap-and-capture",
@@ -286,12 +289,10 @@ def _tap_and_see(
             "--out",
             path,
             *_expected_args(expected_sha256),
-            *expected_image_args,
+            timeout=max(20.0, 15.0 + settle / 1_000),
         )
         result.pop("path", None)
         annotate_screenshot(result, path)
-        if ocr_metadata is not None:
-            result["ocr"] = ocr_metadata
         return _image_payload(result, path)
 
 
@@ -507,38 +508,35 @@ def tap_label(
     x1: float = 1.0,
     y1: float = 1.0,
 ) -> ImageToolResult:
-    """OCR, verify that the observed frame is still current, tap the label, and screenshot."""
+    """Capture, OCR, tap the fresh label target, and screenshot in one native lock transaction."""
     query, region, cap = _validated_text_search(query, x0, y0, x1, y1, 8)
-    with _capture_file() as (source, source_path):
-        _annotate_interaction_state(source, source_path)
-        hit = _attach_screen_state(
-            _find_text_in_capture(query, region, cap, source_path),
-            source,
+    settle = _bounded_int(settle_ms, name="settle_ms", minimum=0, maximum=MAX_SETTLE_MS)
+    with _output_file() as path:
+        result = run_ctl(
+            "tap-label-and-capture",
+            "--query",
+            query,
+            "--mode",
+            mode,
+            "--settle-ms",
+            str(settle),
+            "--x0",
+            str(region[0]),
+            "--y0",
+            str(region[1]),
+            "--x1",
+            str(region[2]),
+            "--y1",
+            str(region[3]),
+            "--limit",
+            str(cap),
+            "--out",
+            path,
+            timeout=max(20.0, 15.0 + settle / 1_000),
         )
-        if not hit.get("found") or hit.get("cx") is None or hit.get("cy") is None:
-            result = dict(source)
-            result["tap"] = {
-                "ok": False,
-                "error": "label not found",
-                "query": query,
-                "matches": hit.get("matches") or [],
-            }
-            result["ocr"] = hit
-            return _image_payload(result, source_path)
-        return _tap_and_see(
-            float(hit["cx"]),
-            float(hit["cy"]),
-            mode=mode,
-            settle_ms=settle_ms,
-            expected_image_path=source_path,
-            ocr_metadata={
-                "query": query,
-                "text": hit.get("text"),
-                "cx": hit.get("cx"),
-                "cy": hit.get("cy"),
-                "confidence": hit.get("confidence"),
-            },
-        )
+        result.pop("path", None)
+        annotate_screenshot(result, path)
+        return _image_payload(result, path)
 
 
 @mcp.tool(annotations=INPUT_TOOL)
@@ -583,7 +581,15 @@ def type_text(
         raise ValueError("text must be a single line; named Return events are not delivered to iOS")
     if "\0" in text:
         raise ValueError("text must not contain NUL characters")
-    return run_ctl("type", "--text", text, "--mode", mode, *_expected_args(expected_sha256))
+    return run_ctl(
+        "type",
+        "--text",
+        text,
+        "--mode",
+        mode,
+        *_expected_args(expected_sha256),
+        timeout=_typing_timeout(text),
+    )
 
 
 @mcp.tool(annotations=INPUT_TOOL)
@@ -618,6 +624,7 @@ def open_app(name: str, expected_sha256: str | None = None) -> dict[str, Any]:
         "--name",
         app_name,
         *_expected_args(expected_sha256),
+        timeout=45.0,
     )
 
 

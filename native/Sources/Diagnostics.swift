@@ -41,6 +41,46 @@ enum Diagnostics {
             )
         )
         let cliclickEdgesPassed = edgePoint == (-762, 1_805)
+        let explicitTapTargetPassed = Input.cliclickTapArguments(x: -762, y: 1_805).last
+            == "c:=-762,1805"
+        let pointerGuardPassed = Input.pointerRemainsAtTarget(
+            CGPoint(x: 100, y: 100),
+            target: CGPoint(x: 104, y: 104)
+        ) && !Input.pointerRemainsAtTarget(
+            CGPoint(x: 120, y: 100),
+            target: CGPoint(x: 100, y: 100)
+        )
+        let midScrollAbortPassed = Input.globalInputBlockReason(
+            frontmost: true,
+            currentPointer: CGPoint(x: 100, y: 100),
+            target: CGPoint(x: 100, y: 100)
+        ) == nil && Input.globalInputBlockReason(
+            frontmost: true,
+            currentPointer: CGPoint(x: 140, y: 100),
+            target: CGPoint(x: 100, y: 100)
+        ) == "user pointer movement detected" && Input.globalInputBlockReason(
+            frontmost: false,
+            currentPointer: CGPoint(x: 100, y: 100),
+            target: CGPoint(x: 100, y: 100)
+        ) == "iPhone Mirroring is no longer frontmost"
+        var syntheticInputCalls = 0
+        let activationRejected = !Input.awaitFrontmost(
+            pid: pid,
+            attempts: 3,
+            activate: { true },
+            frontmostPID: { pid + 1 },
+            pause: {}
+        )
+        if !activationRejected { syntheticInputCalls += 1 }
+        let activationGatePassed = activationRejected && syntheticInputCalls == 0
+        let typingFixture = String(repeating: "a", count: 260) + "🙂"
+        let typingChunks = Input.textChunks(typingFixture, maximumCharacters: 128)
+        let typingChunkingPassed = typingChunks.count == 3
+            && typingChunks.allSatisfy { $0.count <= 128 }
+            && typingChunks.joined() == typingFixture
+        let dependencyPreflightPassed = MirrorCtl.requiresCliclick("open-app")
+            && MirrorCtl.requiresCliclick("tap-label-and-capture")
+            && !MirrorCtl.requiresCliclick("menu")
         let parserPassed: Bool
         do {
             let parsed = try MirrorCtl.parseFlags(
@@ -97,28 +137,56 @@ enum Diagnostics {
         let normalizedRemapPassed = initialPoint?.x == 250
             && movedPoint?.x == -350
             && movedPoint?.y == 802
+        var replacementWindow = movedWindow
+        replacementWindow.windowId = 10
+        let preparedWindowIdentityPassed = Input.preparedWindowIsCurrent(
+            initialWindow,
+            current: movedWindow
+        ) && !Input.preparedWindowIsCurrent(
+            initialWindow,
+            current: replacementWindow
+        )
         let timeoutIsolationPassed = Capture.timeoutIsolationSelfTest()
+        let windowCaptureArguments = Capture.screencaptureArguments(
+            windowId: 77,
+            output: URL(fileURLWithPath: "/tmp/iphone-mirror-self-test.png")
+        )
+        let windowCaptureFallbackPassed = windowCaptureArguments.contains("-l77")
+            && windowCaptureArguments.contains("-o")
+            && !windowCaptureArguments.contains("-R")
         let hostBlockerPassed = ScreenPrecondition.blockedReason(from: [
             ["text": "Connection Paused"],
             ["text": "Resume"],
         ]) == "connection_paused"
         return [
             "ok": selectionPassed && coordinatesPassed
-                && cliclickCoordinatesPassed && cliclickEdgesPassed
+                && cliclickCoordinatesPassed && cliclickEdgesPassed && explicitTapTargetPassed
+                && pointerGuardPassed && midScrollAbortPassed && activationGatePassed
+                && typingChunkingPassed && dependencyPreflightPassed
                 && parserPassed && parserRejectsInvalid && visualComparisonPassed
                 && spotlightSelectionPassed && spotlightEntryPassed
-                && normalizedRemapPassed && timeoutIsolationPassed && hostBlockerPassed,
+                && normalizedRemapPassed && preparedWindowIdentityPassed
+                && timeoutIsolationPassed && windowCaptureFallbackPassed
+                && hostBlockerPassed,
             "windowSelection": selectionPassed,
             "coordinateRoundTrip": coordinatesPassed,
             "cliclickNegativeCoordinates": cliclickCoordinatesPassed,
             "cliclickHalfOpenEdges": cliclickEdgesPassed,
+            "cliclickExplicitTarget": explicitTapTargetPassed,
+            "midActionPointerGuard": pointerGuardPassed,
+            "midScrollAbort": midScrollAbortPassed,
+            "activationGate": activationGatePassed,
+            "typingChunking": typingChunkingPassed,
+            "dependencyPreflight": dependencyPreflightPassed,
             "argumentParser": parserPassed,
             "argumentParserRejectsInvalid": parserRejectsInvalid,
             "visualComparison": visualComparisonPassed,
             "spotlightResultSelection": spotlightSelectionPassed,
             "spotlightEntryDetection": spotlightEntryPassed,
             "normalizedWindowRemap": normalizedRemapPassed,
+            "preparedWindowIdentity": preparedWindowIdentityPassed,
             "captureTimeoutIsolation": timeoutIsolationPassed,
+            "windowOnlyCaptureFallback": windowCaptureFallbackPassed,
             "hostBlockerDetection": hostBlockerPassed,
             "selectedWindowId": selected.map { Int($0.windowId) } ?? -1,
         ]

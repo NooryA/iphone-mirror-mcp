@@ -9,7 +9,10 @@
 - Serialize global input across processes, including the full Spotlight/open-app sequence, and avoid
   overwriting detected user pointer movement.
 - Add optional SHA-256 screen preconditions for state-sensitive actions.
-- Execute host-state validation, fresh normalized mapping, and supported input under one native cross-process lock.
+- Under one native cross-process lock, activate and resolve the mirror before capturing/preflighting that exact
+  window, then verify the same identity immediately before supported input.
+- Run label capture, host validation, OCR target selection, tap, settlement, and result capture in one native
+  transaction so pre-lock OCR coordinates are never trusted.
 - Use structural hashes plus versioned absolute-color signatures so live-video noise is ignored without missing
   flat/color-only screen transitions.
 - Detect known iPhone Mirroring host blocking screens before input, including live-observed Connection Paused.
@@ -31,6 +34,14 @@
 - Preserve arbitrary leading-dash and Unicode CLI values while rejecting unknown, duplicate, and missing flags.
 - Return explicit MCP image content plus structured metadata and exercise every image-tool family over stdio.
 - Isolate timed-out ScreenCaptureKit work from the fallback destination to prevent late-writer races.
+- Capture the resolved window ID in the `screencapture` fallback so overlapping desktop content cannot enter
+  phone screenshots or OCR.
+- Require verified frontmost activation before global input, click explicit absolute coordinates, and abort
+  scrolling before the next tick when focus or pointer ownership changes.
+- Bound native `cliclick` execution, chunk long typing with focus/window checks, derive the outer typing deadline,
+  and kill/reap the entire native process group on timeout so input cannot outlive a failed MCP call.
+- Preflight the `cliclick` dependency before activation or View-menu changes so `open_app` cannot leave Spotlight
+  open when its typing backend is already known to be unavailable.
 - Bundle native source in wheels and atomically compile a signed, integrity-checked, architecture-specific helper
   into the user cache on first use.
 - Keep the Python package and distribution version synchronized.

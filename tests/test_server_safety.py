@@ -29,7 +29,7 @@ def _install_fake_native(
         del timeout
         calls.append(args)
         command = args[0]
-        if command in {"screenshot", "tap-and-capture"}:
+        if command in {"screenshot", "tap-and-capture", "tap-label-and-capture"}:
             output = args[args.index("--out") + 1]
             image = Image.new("RGB", (60, 120), (0, 0, 0))
             for pixel_y in range(120):
@@ -54,9 +54,20 @@ def _install_fake_native(
                 result["command"] = command
                 result["preflightSha256"] = "a" * 64
                 result["tap"] = {"ok": True}
-                if "--expected-image" in args:
-                    expected_path = args[args.index("--expected-image") + 1]
-                    result["expectedImageReadable"] = Path(expected_path).is_file()
+            if command == "tap-label-and-capture":
+                query = args[args.index("--query") + 1]
+                matches = [label_hit] if label_hit else []
+                result["command"] = command
+                result["atomicLabelSelection"] = True
+                result["tap"] = {"ok": bool(matches)}
+                if not matches:
+                    result["tap"].update({"error": "label not found", "query": query, "matches": []})
+                result["ocr"] = {
+                    "query": query,
+                    "found": bool(matches),
+                    "matches": matches,
+                    **(label_hit or {}),
+                }
             return result
         if command == "ocr":
             query = args[args.index("--query") + 1]
@@ -314,12 +325,16 @@ def test_all_public_tool_families_dispatch_with_validated_arguments(
     assert server.find_color(220, 80, 30, tolerance=0, min_pixels=1)["found"] is True
     assert server.find_bright(min_lum=200, min_pixels=1)["found"] is True
     assert server.find_text("Settings")["text"] == "Settings"
+    label_call_start = len(calls)
     tapped = _metadata(server.tap_label("Settings", settle_ms=0))
     assert tapped["ocr"]["text"] == "Settings"
-    assert tapped["expectedImageReadable"] is True
-    label_tap_call = [call for call in calls if call[0] == "tap-and-capture"][-1]
-    assert "--expected-sha256" not in label_tap_call
-    assert "--expected-image" in label_tap_call
+    assert tapped["atomicLabelSelection"] is True
+    label_tap_call = [call for call in calls if call[0] == "tap-label-and-capture"][-1]
+    assert label_tap_call[label_tap_call.index("--query") + 1] == "Settings"
+    assert "--expected-image" not in label_tap_call
+    label_calls = calls[label_call_start:]
+    assert label_calls[0][0] == "tap-label-and-capture"
+    assert all(call[0] != "screenshot" for call in label_calls)
     unchanged = _metadata(server.wait_for_change(timeout_ms=0))
     assert unchanged["timedOut"] is True
     assert unchanged["sha256Changed"] is False
@@ -337,7 +352,7 @@ def test_all_public_tool_families_dispatch_with_validated_arguments(
         "menu",
         "open-app",
         "ocr",
-        "tap-and-capture",
+        "tap-label-and-capture",
     } <= dispatched
 
 
@@ -355,6 +370,11 @@ def test_tap_label_not_found_returns_current_screen(
 def test_invalid_text_is_rejected_before_native_input(text: str) -> None:
     with pytest.raises(ValueError):
         server.type_text(text)
+
+
+def test_typing_timeout_scales_with_the_bounded_payload() -> None:
+    assert server._typing_timeout("short") == 20.0
+    assert server._typing_timeout("x" * server.MAX_TEXT_LENGTH) == 215.0
 
 
 @pytest.mark.parametrize("name", ["", "x" * 201, "Bad\nName", "nul\0name"])

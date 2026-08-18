@@ -1,5 +1,7 @@
 import json
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -39,8 +41,8 @@ def test_run_ctl_normalizes_native_failures(
     binary.touch()
     monkeypatch.setattr(ctl, "BINARY", binary)
     monkeypatch.setattr(
-        ctl.subprocess,
-        "run",
+        ctl,
+        "_run_process",
         lambda *args, **kwargs: subprocess.CompletedProcess(args[0], returncode, stdout, stderr),
     )
     with pytest.raises(ctl.MirrorCtlError, match=message):
@@ -56,9 +58,43 @@ def test_run_ctl_normalizes_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path: P
         del args, kwargs
         raise subprocess.TimeoutExpired(str(binary), 0.25)
 
-    monkeypatch.setattr(ctl.subprocess, "run", timed_out)
+    monkeypatch.setattr(ctl, "_run_process", timed_out)
     with pytest.raises(ctl.MirrorCtlError, match="timed out after 0.25 seconds"):
         ctl.run_ctl("status", timeout=0.25)
+
+
+def test_run_ctl_timeout_kills_the_native_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    started = tmp_path / "started"
+    finished = tmp_path / "finished"
+    binary = tmp_path / "fake-mirror-ctl"
+    binary.write_text(
+        f"""#!{sys.executable}
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+child_code = "import sys,time; from pathlib import Path; Path(sys.argv[2]).write_text('started'); time.sleep(2); Path(sys.argv[1]).write_text('finished')"
+subprocess.Popen([sys.executable, "-c", child_code, sys.argv[1], sys.argv[2]])
+while not Path(sys.argv[2]).exists():
+    time.sleep(0.01)
+time.sleep(60)
+"""
+    )
+    binary.chmod(0o700)
+    monkeypatch.setattr(ctl, "BINARY", binary)
+
+    with pytest.raises(ctl.MirrorCtlError, match="timed out after 1 seconds"):
+        ctl.run_ctl(str(finished), str(started), timeout=1)
+
+    assert started.is_file()
+    deadline = time.monotonic() + 1.5
+    while time.monotonic() < deadline and not finished.exists():
+        time.sleep(0.05)
+    assert not finished.exists()
 
 
 def test_titlebar_environment_validation(monkeypatch: pytest.MonkeyPatch) -> None:

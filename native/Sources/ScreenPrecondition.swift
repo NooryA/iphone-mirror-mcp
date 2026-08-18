@@ -6,6 +6,9 @@ struct ScreenPreconditionState {
     let visualSignature: String
     let windowId: UInt32
     let visualDistance: Double?
+    let window: MirrorWindow
+    let capture: [String: Any]
+    let imageData: Data
 
     var json: [String: Any] {
         var result: [String: Any] = [
@@ -33,6 +36,7 @@ enum ScreenPrecondition {
     ]
 
     static func verify(
+        window: MirrorWindow,
         expectedSHA256 expected: String?,
         expectedImagePath: String?
     ) throws -> ScreenPreconditionState {
@@ -41,7 +45,7 @@ enum ScreenPrecondition {
             .appendingPathComponent("iphone-mirror-precondition-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: currentURL) }
 
-        let capture = try Capture.screenshot(to: currentURL.path)
+        let capture = try Capture.screenshot(window: window, to: currentURL.path)
         let data = try Data(contentsOf: currentURL)
         let actual = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         let signature = try VisualComparison.signature(at: currentURL)
@@ -89,11 +93,14 @@ enum ScreenPrecondition {
             sha256: actual,
             visualSignature: signature,
             windowId: windowId,
-            visualDistance: visualDistance
+            visualDistance: visualDistance,
+            window: window,
+            capture: capture,
+            imageData: data
         )
     }
 
-    private static func validateSHA256(_ expected: String?) throws -> String? {
+    static func validateSHA256(_ expected: String?) throws -> String? {
         guard let expected else { return nil }
         let normalized = expected.lowercased()
         guard normalized.count == 64,

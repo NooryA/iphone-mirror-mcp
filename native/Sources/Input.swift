@@ -2,6 +2,7 @@ import Foundation
 import CoreGraphics
 import AppKit
 import ApplicationServices
+import Darwin
 
 enum InputMode: String {
     case background
@@ -21,9 +22,15 @@ enum Input {
         ProcessInfo.processInfo.environment["MIRROR_HID_RESTORE"] != "0"
     }
 
-    static func tap(x: Double, y: Double, mode: InputMode, overlay: Bool = true) throws -> [String: Any] {
+    static func tap(
+        x: Double,
+        y: Double,
+        mode: InputMode,
+        overlay: Bool = true,
+        preparedWindow: MirrorWindow? = nil
+    ) throws -> [String: Any] {
         try requireTapMode(mode)
-        let win = try WindowFinder.find()
+        let win = try resolvedWindow(preparedWindow)
         guard WindowFinder.contains(win, x: x, y: y) else { throw MirrorError.outsideWindow }
         return try tap(point: CGPoint(x: x, y: y), in: win, mode: mode, overlay: overlay)
     }
@@ -32,10 +39,11 @@ enum Input {
         x: Double,
         y: Double,
         mode: InputMode,
-        overlay: Bool = true
+        overlay: Bool = true,
+        preparedWindow: MirrorWindow? = nil
     ) throws -> [String: Any] {
         try requireTapMode(mode)
-        let win = try WindowFinder.find()
+        let win = try resolvedWindow(preparedWindow)
         let point = try normalizedPoint(x: x, y: y, in: win)
         var result = try tap(point: point, in: win, mode: mode, overlay: overlay)
         result["normalizedX"] = x
@@ -49,7 +57,9 @@ enum Input {
         mode: InputMode,
         overlay: Bool
     ) throws -> [String: Any] {
-        try requireAccessibility()
+        guard isFrontmost(pid: win.pid) else {
+            throw MirrorError.invalidArgs("tap aborted: iPhone Mirroring is no longer frontmost")
+        }
         let extras = try postClick(to: win, at: point, mode: mode, overlay: overlay)
         var result: [String: Any] = [
             "ok": true,
@@ -78,14 +88,26 @@ enum Input {
 
     /// A HID scroll-wheel over the window is the most reliable way to scroll ordinary lists.
     /// `delta` is the wheel line delta per tick (negative = show content below).
-    static func scroll(x: Double, y: Double, delta: Int, ticks: Int) throws -> [String: Any] {
-        let win = try WindowFinder.find()
+    static func scroll(
+        x: Double,
+        y: Double,
+        delta: Int,
+        ticks: Int,
+        preparedWindow: MirrorWindow? = nil
+    ) throws -> [String: Any] {
+        let win = try resolvedWindow(preparedWindow)
         guard WindowFinder.contains(win, x: x, y: y) else { throw MirrorError.outsideWindow }
         return try scroll(point: CGPoint(x: x, y: y), in: win, delta: delta, ticks: ticks)
     }
 
-    static func scrollNormalized(x: Double, y: Double, delta: Int, ticks: Int) throws -> [String: Any] {
-        let win = try WindowFinder.find()
+    static func scrollNormalized(
+        x: Double,
+        y: Double,
+        delta: Int,
+        ticks: Int,
+        preparedWindow: MirrorWindow? = nil
+    ) throws -> [String: Any] {
+        let win = try resolvedWindow(preparedWindow)
         let point = try normalizedPoint(x: x, y: y, in: win)
         var result = try scroll(point: point, in: win, delta: delta, ticks: ticks)
         result["normalizedX"] = x
@@ -99,8 +121,9 @@ enum Input {
         delta: Int,
         ticks: Int
     ) throws -> [String: Any] {
-        try requireAccessibility()
-        activate(win.pid)
+        guard isFrontmost(pid: win.pid) else {
+            throw MirrorError.invalidArgs("scroll aborted: iPhone Mirroring is no longer frontmost")
+        }
         let saved = saveWarpPoint()
         guard cliclickMove(to: point, in: win) else {
             throw MirrorError.invalidArgs(
@@ -109,7 +132,15 @@ enum Input {
         }
         let count = max(1, min(40, ticks))
         let wheel = Int32(max(-120, min(120, delta)))
-        for _ in 0..<count {
+        for tick in 0..<count {
+            let current = saveWarpPoint()
+            if let reason = globalInputBlockReason(
+                frontmost: isFrontmost(pid: win.pid),
+                currentPointer: current,
+                target: point
+            ) {
+                throw MirrorError.invalidArgs("scroll aborted before tick \(tick + 1): \(reason)")
+            }
             guard let event = CGEvent(
                 scrollWheelEvent2Source: nil,
                 units: .line,
@@ -118,6 +149,7 @@ enum Input {
                 wheel2: 0,
                 wheel3: 0
             ) else { throw MirrorError.invalidArgs("could not create scroll-wheel event") }
+            event.location = point
             event.post(tap: .cghidEventTap)
             usleep(35_000)
         }
@@ -159,7 +191,11 @@ enum Input {
         }
     }
 
-    static func typeText(_ text: String, mode: InputMode) throws -> [String: Any] {
+    static func typeText(
+        _ text: String,
+        mode: InputMode,
+        preparedWindow: MirrorWindow? = nil
+    ) throws -> [String: Any] {
         guard !text.isEmpty, text.count <= 4_000 else {
             throw MirrorError.invalidArgs("text length must be between 1 and 4000 characters")
         }
@@ -173,21 +209,26 @@ enum Input {
                 "background text events are not delivered to iOS; use hid or skylight"
             )
         }
-        let win = try WindowFinder.find()
-        try requireAccessibility()
-        activate(win.pid)
-        if cliclickType(text) {
-            return [
-                "ok": true,
-                "mode": mode.rawValue,
-                "length": text.count,
-                "cursorMoved": false,
-                "backend": "cliclick",
-            ]
+        let win = try resolvedWindow(preparedWindow)
+        let chunks = textChunks(text)
+        var typed = 0
+        for chunk in chunks {
+            _ = try resolvedWindow(win)
+            guard cliclickType(chunk) else {
+                throw MirrorError.invalidArgs(
+                    "cliclick typing failed or timed out after \(typed) of \(text.count) characters"
+                )
+            }
+            typed += chunk.count
         }
-        throw MirrorError.invalidArgs(
-            "cliclick is required for reliable iPhone Mirroring keyboard input"
-        )
+        return [
+            "ok": true,
+            "mode": mode.rawValue,
+            "length": text.count,
+            "chunks": chunks.count,
+            "cursorMoved": false,
+            "backend": "cliclick",
+        ]
     }
 
     static func pressNamedKey(_ name: String, mode: InputMode) throws -> [String: Any] {
@@ -205,14 +246,94 @@ enum Input {
         }
     }
 
-    private static func activate(_ pid: pid_t) {
-        guard let app = NSRunningApplication(processIdentifier: pid) else { return }
-        if app.isActive {
-            usleep(8_000)
-            return
+    static func prepareForInput() throws -> MirrorWindow {
+        try requireAccessibility()
+        return try activateAndRefresh(try WindowFinder.find())
+    }
+
+    private static func resolvedWindow(_ prepared: MirrorWindow?) throws -> MirrorWindow {
+        try requireAccessibility()
+        guard let prepared else { return try activateAndRefresh(try WindowFinder.find()) }
+        guard isFrontmost(pid: prepared.pid) else {
+            throw MirrorError.invalidArgs("iPhone Mirroring focus changed after preflight; no input was sent")
         }
-        app.activate()
-        usleep(80_000)
+        let current = try WindowFinder.find()
+        guard preparedWindowIsCurrent(prepared, current: current) else {
+            throw MirrorError.invalidArgs("iPhone Mirroring window changed after preflight; no input was sent")
+        }
+        return current
+    }
+
+    static func preparedWindowIsCurrent(_ prepared: MirrorWindow, current: MirrorWindow) -> Bool {
+        prepared.pid == current.pid && prepared.windowId == current.windowId
+    }
+
+    private static func activateAndRefresh(_ expected: MirrorWindow) throws -> MirrorWindow {
+        guard let app = NSRunningApplication(processIdentifier: expected.pid),
+              app.bundleIdentifier == WindowFinder.bundleId else {
+            throw MirrorError.invalidArgs("could not resolve the iPhone Mirroring application")
+        }
+        let confirmed = awaitFrontmost(
+            pid: expected.pid,
+            activate: { app.isActive || app.activate() },
+            frontmostPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+            pause: { usleep(25_000) }
+        )
+        guard confirmed else {
+            throw MirrorError.invalidArgs("could not make iPhone Mirroring frontmost; no input was sent")
+        }
+        let refreshed = try WindowFinder.find()
+        guard refreshed.pid == expected.pid, isFrontmost(pid: refreshed.pid) else {
+            throw MirrorError.invalidArgs("iPhone Mirroring focus changed before input; no input was sent")
+        }
+        return refreshed
+    }
+
+    static func awaitFrontmost(
+        pid: pid_t,
+        attempts: Int = 20,
+        activate: () -> Bool,
+        frontmostPID: () -> pid_t?,
+        pause: () -> Void
+    ) -> Bool {
+        guard activate() else { return false }
+        for attempt in 0..<max(1, attempts) {
+            if frontmostPID() == pid { return true }
+            if attempt + 1 < attempts { pause() }
+        }
+        return false
+    }
+
+    private static func isFrontmost(pid: pid_t) -> Bool {
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+    }
+
+    static func pointerRemainsAtTarget(_ current: CGPoint, target: CGPoint) -> Bool {
+        hypot(current.x - target.x, current.y - target.y) <= 8
+    }
+
+    static func globalInputBlockReason(
+        frontmost: Bool,
+        currentPointer: CGPoint,
+        target: CGPoint
+    ) -> String? {
+        if !frontmost { return "iPhone Mirroring is no longer frontmost" }
+        if !pointerRemainsAtTarget(currentPointer, target: target) {
+            return "user pointer movement detected"
+        }
+        return nil
+    }
+
+    static func textChunks(_ text: String, maximumCharacters: Int = 128) -> [String] {
+        let limit = max(1, maximumCharacters)
+        var chunks: [String] = []
+        var start = text.startIndex
+        while start < text.endIndex {
+            let end = text.index(start, offsetBy: limit, limitedBy: text.endIndex) ?? text.endIndex
+            chunks.append(String(text[start..<end]))
+            start = end
+        }
+        return chunks
     }
 
     private static func saveWarpPoint() -> CGPoint {
@@ -237,12 +358,7 @@ enum Input {
         let (x, y) = cliclickPoint(point, in: window)
         let succeeded = runCliclick(
             path: path,
-            arguments: [
-                "w:\(cliclickWaitMs)",
-                "m:\(cliclickCoordinate(x)),\(cliclickCoordinate(y))",
-                "w:\(cliclickWaitMs)",
-                "c:.",
-            ]
+            arguments: cliclickTapArguments(x: x, y: y)
         )
         let userInterference = shouldRestorePointer
             ? restorePointer(saved, expectedCurrent: point)
@@ -253,6 +369,15 @@ enum Input {
                 cursorMoved: !shouldRestorePointer || userInterference
             )
             : nil
+    }
+
+    static func cliclickTapArguments(x: Int, y: Int) -> [String] {
+        [
+            "w:\(cliclickWaitMs)",
+            "m:\(cliclickCoordinate(x)),\(cliclickCoordinate(y))",
+            "w:\(cliclickWaitMs)",
+            "c:\(cliclickCoordinate(x)),\(cliclickCoordinate(y))",
+        ]
     }
 
     /// cliclick treats a leading minus as a relative coordinate unless it is prefixed with `=`.
@@ -276,7 +401,11 @@ enum Input {
         return runCliclick(path: path, arguments: ["t:\(text)"])
     }
 
-    private static func runCliclick(path: String, arguments: [String]) -> Bool {
+    private static func runCliclick(
+        path: String,
+        arguments: [String],
+        timeoutMs: Int = 5_000
+    ) -> Bool {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: path)
         proc.arguments = arguments
@@ -284,6 +413,21 @@ enum Input {
         proc.standardError = FileHandle.nullDevice
         do {
             try proc.run()
+            let deadline = DispatchTime.now().uptimeNanoseconds
+                + UInt64(max(1, timeoutMs)) * 1_000_000
+            while proc.isRunning, DispatchTime.now().uptimeNanoseconds < deadline {
+                usleep(10_000)
+            }
+            if proc.isRunning {
+                proc.terminate()
+                let terminateDeadline = DispatchTime.now().uptimeNanoseconds + 250_000_000
+                while proc.isRunning, DispatchTime.now().uptimeNanoseconds < terminateDeadline {
+                    usleep(10_000)
+                }
+                if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
+                proc.waitUntilExit()
+                return false
+            }
             proc.waitUntilExit()
             return proc.terminationStatus == 0
         } catch {
@@ -301,7 +445,6 @@ enum Input {
             return try postOverlayClick(to: win, at: point, overlay: overlay)
         }
         if mode == .hid {
-            activate(win.pid)
             if let outcome = cliclick(at: point, in: win) {
                 let local = WindowFinder.localPoint(point, in: win)
                 return [
@@ -329,7 +472,6 @@ enum Input {
         let started = DispatchTime.now()
         let local = WindowFinder.localPoint(point, in: win)
         let before = NSEvent.mouseLocation
-        activate(win.pid)
         if overlay {
             MainActor.assumeIsolated { OverlayCursor.show(atWarp: point) }
         }

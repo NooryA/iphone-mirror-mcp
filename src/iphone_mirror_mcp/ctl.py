@@ -5,6 +5,7 @@ import json
 import math
 import os
 import platform
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +20,39 @@ PACKAGE_NATIVE_ROOT = Path(__file__).resolve().parent / "native"
 
 class MirrorCtlError(RuntimeError):
     pass
+
+
+def _run_process(
+    args: list[str],
+    *,
+    timeout: float,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
 def _native_binary() -> Path:
@@ -55,12 +89,9 @@ def _native_binary() -> Path:
         env["MIRROR_NATIVE_SRC"] = str(sources)
         env["MIRROR_NATIVE_OUT"] = str(target)
         try:
-            built = subprocess.run(
+            built = _run_process(
                 ["/bin/bash", str(builder)],
-                capture_output=True,
-                text=True,
                 timeout=180,
-                check=False,
                 env=env,
             )
         except subprocess.TimeoutExpired as exc:
@@ -74,12 +105,9 @@ def _native_binary() -> Path:
 def run_ctl(*args: str, timeout: float = 20.0) -> dict[str, Any]:
     binary = _native_binary()
     try:
-        proc = subprocess.run(
+        proc = _run_process(
             [str(binary), *args],
-            capture_output=True,
-            text=True,
             timeout=timeout,
-            check=False,
         )
     except subprocess.TimeoutExpired as exc:
         raise MirrorCtlError(f"mirror-ctl timed out after {timeout:g} seconds") from exc

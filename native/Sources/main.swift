@@ -3,8 +3,8 @@ import Foundation
 @main
 enum MirrorCtl {
     private static let inputCommands: Set<String> = [
-        "tap", "tap-normalized", "tap-and-capture", "swipe", "scroll", "scroll-normalized",
-        "type", "key", "menu", "open-app",
+        "tap", "tap-normalized", "tap-and-capture", "tap-label-and-capture", "swipe", "scroll",
+        "scroll-normalized", "type", "key", "menu", "open-app",
     ]
 
     private static let allowedFlags: [String: Set<String>] = [
@@ -16,6 +16,10 @@ enum MirrorCtl {
         "tap-normalized": ["x", "y", "mode", "overlay", "expected-sha256", "expected-image"],
         "tap-and-capture": [
             "x", "y", "mode", "overlay", "settle-ms", "out", "expected-sha256", "expected-image",
+        ],
+        "tap-label-and-capture": [
+            "query", "mode", "overlay", "settle-ms", "out", "x0", "y0", "x1", "y1", "limit",
+            "expected-sha256",
         ],
         "swipe": ["x1", "y1", "x2", "y2", "duration-ms", "mode", "expected-sha256"],
         "scroll": ["x", "y", "delta", "ticks", "expected-sha256", "expected-image"],
@@ -32,7 +36,7 @@ enum MirrorCtl {
         guard let command = args.first else {
             JSONOut.print([
                 "ok": false,
-                "error": "usage: mirror-ctl status|doctor|self-test|screenshot|tap-normalized|tap-and-capture|swipe|scroll-normalized|ocr|type|key|menu|open-app",
+                "error": "usage: mirror-ctl status|doctor|self-test|screenshot|tap-normalized|tap-and-capture|tap-label-and-capture|swipe|scroll-normalized|ocr|type|key|menu|open-app",
             ])
             exit(2)
         }
@@ -44,9 +48,13 @@ enum MirrorCtl {
             let result: [String: Any]
             if inputCommands.contains(command) {
                 try validateInputArguments(command, flags: flags)
+                _ = try ScreenPrecondition.validateSHA256(flags["expected-sha256"])
+                try validateRuntimeRequirements(command)
                 let lock = try ActionLock()
                 result = try withExtendedLifetime(lock) {
+                    let preparedWindow = try Input.prepareForInput()
                     let preflight = try ScreenPrecondition.verify(
+                        window: preparedWindow,
                         expectedSHA256: flags["expected-sha256"],
                         expectedImagePath: flags["expected-image"]
                     )
@@ -94,6 +102,35 @@ enum MirrorCtl {
                     name: "settle-ms"
                 )
             }
+        case "tap-label-and-capture":
+            let inputMode = try mode(flags["mode"], default: .skylight)
+            guard inputMode != .background else {
+                throw MirrorError.invalidArgs(
+                    "background tap events are not delivered to iOS; use hid or skylight"
+                )
+            }
+            guard let query = flags["query"], !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  query.count <= 500 else {
+                throw MirrorError.invalidArgs("tap-label-and-capture requires a 1-500 character --query")
+            }
+            guard flags["out"] != nil else {
+                throw MirrorError.invalidArgs("tap-label-and-capture requires --out")
+            }
+            let x0 = try strictDouble(flags["x0"], default: 0, minimum: 0, maximum: 1, name: "x0")
+            let y0 = try strictDouble(flags["y0"], default: 0, minimum: 0, maximum: 1, name: "y0")
+            let x1 = try strictDouble(flags["x1"], default: 1, minimum: 0, maximum: 1, name: "x1")
+            let y1 = try strictDouble(flags["y1"], default: 1, minimum: 0, maximum: 1, name: "y1")
+            guard x0 < x1, y0 < y1 else {
+                throw MirrorError.invalidArgs("label region must satisfy x0 < x1 and y0 < y1")
+            }
+            _ = try strictInt(flags["limit"], default: 8, minimum: 1, maximum: 32, name: "limit")
+            _ = try strictInt(
+                flags["settle-ms"],
+                default: 300,
+                minimum: 0,
+                maximum: 10_000,
+                name: "settle-ms"
+            )
         case "swipe":
             throw MirrorError.invalidArgs(
                 "drag swipes are not delivered to iOS by iPhone Mirroring; use scroll instead"
@@ -167,20 +204,35 @@ enum MirrorCtl {
             }
             return try Capture.screenshot(to: out)
         case "tap":
+            let preflight = try requiredPreflight(preflight, command: command)
             let inputMode = try mode(flags["mode"], default: .skylight)
             guard let x = finiteDouble(flags["x"]), let y = finiteDouble(flags["y"]) else {
                 throw MirrorError.invalidArgs("tap requires finite --x and --y")
             }
             let overlay = flags["overlay"] != "false"
-            return try Input.tap(x: x, y: y, mode: inputMode, overlay: overlay)
+            return try Input.tap(
+                x: x,
+                y: y,
+                mode: inputMode,
+                overlay: overlay,
+                preparedWindow: preflight.window
+            )
         case "tap-normalized":
+            let preflight = try requiredPreflight(preflight, command: command)
             let inputMode = try mode(flags["mode"], default: .skylight)
             guard let x = finiteDouble(flags["x"]), let y = finiteDouble(flags["y"]) else {
                 throw MirrorError.invalidArgs("tap-normalized requires finite --x and --y")
             }
             let overlay = flags["overlay"] != "false"
-            return try Input.tapNormalized(x: x, y: y, mode: inputMode, overlay: overlay)
+            return try Input.tapNormalized(
+                x: x,
+                y: y,
+                mode: inputMode,
+                overlay: overlay,
+                preparedWindow: preflight.window
+            )
         case "tap-and-capture":
+            let preflight = try requiredPreflight(preflight, command: command)
             let inputMode = try mode(flags["mode"], default: .skylight)
             guard let x = finiteDouble(flags["x"]), let y = finiteDouble(flags["y"]),
                   let output = flags["out"] else {
@@ -188,12 +240,23 @@ enum MirrorCtl {
             }
             let overlay = flags["overlay"] != "false"
             let settle = boundedInt(flags["settle-ms"], default: 300, minimum: 0, maximum: 10_000)
-            let tap = try Input.tapNormalized(x: x, y: y, mode: inputMode, overlay: overlay)
+            let tap = try Input.tapNormalized(
+                x: x,
+                y: y,
+                mode: inputMode,
+                overlay: overlay,
+                preparedWindow: preflight.window
+            )
             if settle > 0 { usleep(useconds_t(settle * 1_000)) }
-            var capture = try Capture.screenshot(to: output)
+            var capture = try Capture.screenshot(window: preflight.window, to: output)
             capture["tap"] = tap
             capture["settleMs"] = settle
             return capture
+        case "tap-label-and-capture":
+            guard let preflight else {
+                throw MirrorError.invalidArgs("tap-label-and-capture requires an input preflight")
+            }
+            return try tapLabelAndCapture(flags: flags, preflight: preflight)
         case "swipe":
             let inputMode = try mode(flags["mode"], default: .hid)
             guard let x1 = finiteDouble(flags["x1"]), let y1 = finiteDouble(flags["y1"]),
@@ -210,19 +273,33 @@ enum MirrorCtl {
                 mode: inputMode
             )
         case "scroll":
+            let preflight = try requiredPreflight(preflight, command: command)
             guard let x = finiteDouble(flags["x"]), let y = finiteDouble(flags["y"]) else {
                 throw MirrorError.invalidArgs("scroll requires finite --x and --y")
             }
             let delta = boundedInt(flags["delta"], default: -12, minimum: -120, maximum: 120)
             let ticks = boundedInt(flags["ticks"], default: 8, minimum: 1, maximum: 40)
-            return try Input.scroll(x: x, y: y, delta: delta, ticks: ticks)
+            return try Input.scroll(
+                x: x,
+                y: y,
+                delta: delta,
+                ticks: ticks,
+                preparedWindow: preflight.window
+            )
         case "scroll-normalized":
+            let preflight = try requiredPreflight(preflight, command: command)
             guard let x = finiteDouble(flags["x"]), let y = finiteDouble(flags["y"]) else {
                 throw MirrorError.invalidArgs("scroll-normalized requires finite --x and --y")
             }
             let delta = boundedInt(flags["delta"], default: -12, minimum: -120, maximum: 120)
             let ticks = boundedInt(flags["ticks"], default: 8, minimum: 1, maximum: 40)
-            return try Input.scrollNormalized(x: x, y: y, delta: delta, ticks: ticks)
+            return try Input.scrollNormalized(
+                x: x,
+                y: y,
+                delta: delta,
+                ticks: ticks,
+                preparedWindow: preflight.window
+            )
         case "ocr":
             guard let image = flags["image"] else {
                 throw MirrorError.invalidArgs("ocr requires --image")
@@ -237,11 +314,12 @@ enum MirrorCtl {
                 limit: boundedInt(flags["limit"], default: 8, minimum: 1, maximum: 32)
             )
         case "type":
+            let preflight = try requiredPreflight(preflight, command: command)
             let inputMode = try mode(flags["mode"], default: .hid)
             guard let text = flags["text"] else {
                 throw MirrorError.invalidArgs("type requires --text")
             }
-            return try Input.typeText(text, mode: inputMode)
+            return try Input.typeText(text, mode: inputMode, preparedWindow: preflight.window)
         case "key":
             let inputMode = try mode(flags["mode"], default: .hid)
             guard let name = flags["name"] else {
@@ -249,10 +327,11 @@ enum MirrorCtl {
             }
             return try Input.pressNamedKey(name, mode: inputMode)
         case "menu":
+            let preflight = try requiredPreflight(preflight, command: command)
             guard let action = flags["action"] else {
                 throw MirrorError.invalidArgs("menu requires --action")
             }
-            return try MenuControl.invoke(action)
+            return try MenuControl.invoke(action, expectedWindowId: preflight.windowId)
         case "open-app":
             guard let rawName = flags["name"] else {
                 throw MirrorError.invalidArgs("open-app requires --name")
@@ -295,6 +374,32 @@ enum MirrorCtl {
         return output
     }
 
+    static func requiredPreflight(
+        _ preflight: ScreenPreconditionState?,
+        command: String
+    ) throws -> ScreenPreconditionState {
+        guard let preflight else {
+            throw MirrorError.invalidArgs("\(command) requires an input preflight")
+        }
+        return preflight
+    }
+
+    static func validateRuntimeRequirements(_ command: String) throws {
+        guard requiresCliclick(command) else { return }
+        guard Dependencies.cliclickPath() != nil else {
+            throw MirrorError.invalidArgs(
+                "cliclick is required for \(command); no app/window state was changed"
+            )
+        }
+    }
+
+    static func requiresCliclick(_ command: String) -> Bool {
+        [
+            "tap", "tap-normalized", "tap-and-capture", "tap-label-and-capture",
+            "scroll", "scroll-normalized", "type", "open-app",
+        ].contains(command)
+    }
+
     static func finiteDouble(_ raw: String?) -> Double? {
         guard let raw, let value = Double(raw), value.isFinite else { return nil }
         return value
@@ -334,6 +439,20 @@ enum MirrorCtl {
         return value
     }
 
+    static func strictDouble(
+        _ raw: String?,
+        default defaultValue: Double,
+        minimum: Double,
+        maximum: Double,
+        name: String
+    ) throws -> Double {
+        guard let raw else { return defaultValue }
+        guard let value = finiteDouble(raw), value >= minimum, value <= maximum else {
+            throw MirrorError.invalidArgs("--\(name) must be a finite number between \(minimum) and \(maximum)")
+        }
+        return value
+    }
+
     static func mode(_ raw: String?, default defaultMode: InputMode) throws -> InputMode {
         guard let raw else { return defaultMode }
         guard let value = InputMode(rawValue: raw) else {
@@ -346,7 +465,7 @@ enum MirrorCtl {
         _ name: String,
         preflight: ScreenPreconditionState
     ) throws -> [String: Any] {
-        let spotlight = try MenuControl.invoke("spotlight")
+        let spotlight = try MenuControl.invoke("spotlight", expectedWindowId: preflight.windowId)
         let screenshot = FileManager.default.temporaryDirectory
             .appendingPathComponent("iphone-mirror-open-app-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: screenshot) }
@@ -355,7 +474,13 @@ enum MirrorCtl {
         var spotlightConfirmed = false
         for attempt in 0..<12 {
             usleep(attempt == 0 ? 250_000 : 150_000)
-            let matches = try captureOCRMatches(to: screenshot, query: "", y0: 0, y1: 0.55)
+            let matches = try captureOCRMatches(
+                window: preflight.window,
+                to: screenshot,
+                query: "",
+                y0: 0,
+                y1: 0.55
+            )
             let signature = try VisualComparison.signature(at: screenshot)
             spotlightEntryDistance = try VisualComparison.distance(preflight.visualSignature, signature)
             if spotlightEntryDistance > VisualComparison.materialDifferenceThreshold,
@@ -370,13 +495,19 @@ enum MirrorCtl {
             )
         }
 
-        let typed = try Input.typeText(name, mode: .hid)
+        let typed = try Input.typeText(name, mode: .hid, preparedWindow: preflight.window)
         var selectedOCR: [String: Any]?
         var selectedSignature: String?
         var lastMatchCount = 0
         for attempt in 0..<10 {
             usleep(attempt == 0 ? 400_000 : 300_000)
-            let matches = try captureOCRMatches(to: screenshot, query: name, y0: 0.12, y1: 0.55)
+            let matches = try captureOCRMatches(
+                window: preflight.window,
+                to: screenshot,
+                query: name,
+                y0: 0.12,
+                y1: 0.55
+            )
             lastMatchCount = matches.count
             if let exactMatch = selectSpotlightResult(matches, appName: name) {
                 selectedOCR = exactMatch
@@ -399,14 +530,21 @@ enum MirrorCtl {
         let resultTap = try Input.tapNormalized(
             x: normalizedX,
             y: normalizedY,
-            mode: .skylight
+            mode: .skylight,
+            preparedWindow: preflight.window
         )
 
         var exitDistance = 0.0
         var transitionConfirmed = false
         for attempt in 0..<16 {
             usleep(attempt == 0 ? 350_000 : 250_000)
-            let matches = try captureOCRMatches(to: screenshot, query: "", y0: 0, y1: 0.65)
+            let matches = try captureOCRMatches(
+                window: preflight.window,
+                to: screenshot,
+                query: "",
+                y0: 0,
+                y1: 0.65
+            )
             let signature = try VisualComparison.signature(at: screenshot)
             exitDistance = try VisualComparison.distance(querySignature, signature)
             if exitDistance > VisualComparison.materialDifferenceThreshold,
@@ -439,6 +577,74 @@ enum MirrorCtl {
         ]
     }
 
+    private static func tapLabelAndCapture(
+        flags: [String: String],
+        preflight: ScreenPreconditionState
+    ) throws -> [String: Any] {
+        guard let query = flags["query"], let output = flags["out"] else {
+            throw MirrorError.invalidArgs("tap-label-and-capture requires --query and --out")
+        }
+        let inputMode = try mode(flags["mode"], default: .skylight)
+        let overlay = flags["overlay"] != "false"
+        let settle = boundedInt(flags["settle-ms"], default: 300, minimum: 0, maximum: 10_000)
+        let source = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iphone-mirror-label-source-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: source) }
+        try preflight.imageData.write(to: source, options: .atomic)
+
+        let ocr = try OCR.recognize(
+            imageAt: source.path,
+            query: query,
+            x0: boundedDouble(flags["x0"], default: 0, minimum: 0, maximum: 1),
+            y0: boundedDouble(flags["y0"], default: 0, minimum: 0, maximum: 1),
+            x1: boundedDouble(flags["x1"], default: 1, minimum: 0, maximum: 1),
+            y1: boundedDouble(flags["y1"], default: 1, minimum: 0, maximum: 1),
+            limit: boundedInt(flags["limit"], default: 8, minimum: 1, maximum: 32)
+        )
+        guard ocr["found"] as? Bool == true,
+              let x = (ocr["cx"] as? NSNumber)?.doubleValue,
+              let y = (ocr["cy"] as? NSNumber)?.doubleValue else {
+            let outputURL = URL(fileURLWithPath: output)
+            try FileManager.default.createDirectory(
+                at: outputURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try preflight.imageData.write(to: outputURL, options: .atomic)
+            var result = preflight.capture
+            result["path"] = output
+            result["ocr"] = ocr
+            result["tap"] = [
+                "ok": false,
+                "error": "label not found",
+                "query": query,
+                "matches": ocr["matches"] ?? [],
+            ]
+            result["atomicLabelSelection"] = true
+            return result
+        }
+
+        let tap = try Input.tapNormalized(
+            x: x,
+            y: y,
+            mode: inputMode,
+            overlay: overlay,
+            preparedWindow: preflight.window
+        )
+        if settle > 0 { usleep(useconds_t(settle * 1_000)) }
+        var result = try Capture.screenshot(window: preflight.window, to: output)
+        result["tap"] = tap
+        result["ocr"] = [
+            "query": query,
+            "text": ocr["text"] ?? NSNull(),
+            "cx": x,
+            "cy": y,
+            "confidence": ocr["confidence"] ?? NSNull(),
+        ]
+        result["settleMs"] = settle
+        result["atomicLabelSelection"] = true
+        return result
+    }
+
     static func selectSpotlightResult(
         _ matches: [[String: Any]],
         appName: String
@@ -452,13 +658,14 @@ enum MirrorCtl {
     }
 
     private static func captureOCRMatches(
+        window: MirrorWindow,
         to screenshot: URL,
         query: String,
         y0: Double,
         y1: Double
     ) throws -> [[String: Any]] {
         try? FileManager.default.removeItem(at: screenshot)
-        _ = try Capture.screenshot(to: screenshot.path)
+        _ = try Capture.screenshot(window: window, to: screenshot.path)
         let ocr = try OCR.recognize(
             imageAt: screenshot.path,
             query: query,

@@ -58,13 +58,21 @@ def test_native_self_test_covers_window_selection_and_coordinate_round_trip() ->
         "coordinateRoundTrip",
         "cliclickNegativeCoordinates",
         "cliclickHalfOpenEdges",
+        "cliclickExplicitTarget",
+        "midActionPointerGuard",
+        "midScrollAbort",
+        "activationGate",
+        "typingChunking",
+        "dependencyPreflight",
         "argumentParser",
         "argumentParserRejectsInvalid",
         "visualComparison",
         "spotlightResultSelection",
         "spotlightEntryDetection",
         "normalizedWindowRemap",
+        "preparedWindowIdentity",
         "captureTimeoutIsolation",
+        "windowOnlyCaptureFallback",
         "hostBlockerDetection",
     ):
         assert payload[check] is True
@@ -170,6 +178,24 @@ def test_native_open_app_rejects_invalid_names_before_input(name: str) -> None:
     assert process.returncode == 1
     assert payload["ok"] is False
     assert "app name" in payload["error"]
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (("--query", "", "--out", "/tmp/out.png"), "1-500 character"),
+        (("--query", "Continue"), "requires --out"),
+        (("--query", "Continue", "--out", "/tmp/out.png", "--x0", "0.9", "--x1", "0.1"), "x0 < x1"),
+    ],
+)
+def test_native_tap_label_validation_does_not_require_a_phone_window(
+    args: tuple[str, ...],
+    message: str,
+) -> None:
+    process, payload = _run("tap-label-and-capture", *args)
+    assert process.returncode == 1
+    assert payload["ok"] is False
+    assert message in payload["error"]
 
 
 def test_one_hundred_concurrent_status_processes_return_valid_json() -> None:

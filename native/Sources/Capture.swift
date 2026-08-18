@@ -7,7 +7,10 @@ import UniformTypeIdentifiers
 
 enum Capture {
     static func screenshot(to path: String) throws -> [String: Any] {
-        let win = try WindowFinder.find()
+        try screenshot(window: WindowFinder.find(), to: path)
+    }
+
+    static func screenshot(window win: MirrorWindow, to path: String) throws -> [String: Any] {
         let url = URL(fileURLWithPath: path)
         do {
             try captureWithScreenCaptureKit(window: win, to: url)
@@ -46,10 +49,10 @@ enum Capture {
     }
 
     private static func captureWithScreencapture(win: MirrorWindow, to url: URL) throws {
-        let rect = "\(Int(win.x.rounded())),\(Int(win.y.rounded())),\(Int(win.width.rounded())),\(Int(win.height.rounded()))"
+        try? FileManager.default.removeItem(at: url)
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        proc.arguments = ["-x", "-R", rect, url.path]
+        proc.arguments = screencaptureArguments(windowId: win.windowId, output: url)
         let err = Pipe()
         proc.standardError = err
         try proc.run()
@@ -65,6 +68,10 @@ enum Capture {
         )
     }
 
+    static func screencaptureArguments(windowId: UInt32, output: URL) -> [String] {
+        ["-x", "-o", "-l\(windowId)", output.path]
+    }
+
     private static func cropTitlebar(_ image: CGImage, titlebarPoints: Double, scale: CGFloat) -> CGImage {
         let top = Int((titlebarPoints * Double(scale)).rounded())
         let height = image.height - top
@@ -75,7 +82,10 @@ enum Capture {
 
     private static func cropFileTitlebar(_ url: URL, titlebarPoints: Double, scale: CGFloat) throws {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return }
+              let image = CGImageSourceCreateImageAtIndex(src, 0, nil),
+              image.width > 0, image.height > 0 else {
+            throw MirrorError.captureFailed("screencapture produced an invalid image")
+        }
         let cropped = cropTitlebar(image, titlebarPoints: titlebarPoints, scale: scale)
         try writePNG(cropped, to: url)
     }

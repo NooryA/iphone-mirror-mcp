@@ -55,7 +55,7 @@ command = args[0]
 def value(flag):
     return args[args.index(flag) + 1]
 
-if command in {{"screenshot", "tap-and-capture"}}:
+if command in {{"screenshot", "tap-and-capture", "tap-label-and-capture"}}:
     output = value("--out")
     Image.new("RGB", (32, 64), (20, 40, 60)).save(output)
     result = {{
@@ -72,6 +72,12 @@ if command in {{"screenshot", "tap-and-capture"}}:
     if command == "tap-and-capture":
         result["tap"] = {{"ok": True}}
         result["preflightSha256"] = "a" * 64
+    if command == "tap-label-and-capture":
+        query = value("--query")
+        found = query == "Settings"
+        result["atomicLabelSelection"] = True
+        result["tap"] = {{"ok": found}}
+        result["ocr"] = {{"query": query, "found": found, "matches": []}}
 elif command == "ocr":
     query = value("--query")
     matches = []
