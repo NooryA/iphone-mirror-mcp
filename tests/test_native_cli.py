@@ -79,7 +79,9 @@ def test_native_self_test_covers_window_selection_and_coordinate_round_trip() ->
         "captureTimeoutIsolation",
         "windowOnlyCaptureFallback",
         "hostBlockerDetection",
+        "hostBlockerGeometryBoundaries",
         "hostBlockerGeometryGrouping",
+        "hostBlockerMalformedGeometry",
         "hostBlockerFallbackTrigger",
         "ocrTwoPassEvidence",
     ):

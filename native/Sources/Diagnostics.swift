@@ -333,6 +333,10 @@ enum Diagnostics {
                 textBox(first, 0.15, 0.20, 0.55, 0.24),
                 textBox(remainder, 0.16, 0.25, 0.80, 0.29),
             ]) == reason
+            let overlappingLineWrapped = ScreenPrecondition.blockedReason(from: [
+                textBox(first, 0.15, 0.20, 0.55, 0.25),
+                textBox(remainder, 0.16, 0.245, 0.80, 0.295),
+            ]) == reason
             let distant = ScreenPrecondition.blockedReason(from: [
                 textBox(first, 0.10, 0.20, 0.16, 0.24),
                 textBox(remainder, 0.70, 0.20, 0.95, 0.24),
@@ -346,12 +350,114 @@ enum Diagnostics {
                 textBox("Unrelated", 0.17, 0.20, 0.28, 0.24),
                 textBox(remainder, 0.29, 0.20, 0.80, 0.24),
             ]) == nil
+            let contained = ScreenPrecondition.blockedReason(from: [
+                textBox(first, 0.10, 0.20, 0.90, 0.24),
+                textBox(remainder, 0.20, 0.20, 0.30, 0.24),
+            ]) == nil
             let unpositioned = ScreenPrecondition.blockedReason(from: [
                 ["text": first],
                 ["text": remainder],
             ]) == nil
-            return single && adjacent && lineWrapped && distant && reversed
-                && intervening && unpositioned
+            return single && adjacent && lineWrapped && overlappingLineWrapped
+                && distant && reversed && intervening && contained && unpositioned
+        }
+        let hostBlockerBoundaryPassed =
+            ScreenPrecondition.blockedReason(from: [
+                textBox("Connection", 0.10, 0.20, 0.30, 0.24),
+                textBox("Paused", 0.2901, 0.20, 0.50, 0.24),
+            ]) == "connection_paused"
+            && ScreenPrecondition.blockedReason(from: [
+                textBox("Connection", 0.10, 0.20, 0.30, 0.24),
+                textBox("Paused", 0.2899, 0.20, 0.50, 0.24),
+            ]) == nil
+            && ScreenPrecondition.blockedReason(from: [
+                textBox("Connection", 0.10, 0.20, 0.30, 0.24),
+                textBox("Paused", 0.3699, 0.20, 0.50, 0.24),
+            ]) == "connection_paused"
+            && ScreenPrecondition.blockedReason(from: [
+                textBox("Connection", 0.10, 0.20, 0.30, 0.24),
+                textBox("Paused", 0.3701, 0.20, 0.50, 0.24),
+            ]) == nil
+            && ScreenPrecondition.blockedReason(from: [
+                textBox("Connection", 0.10, 0.20, 0.50, 0.24),
+                textBox("Paused", 0.10, 0.2301, 0.50, 0.2701),
+            ]) == "connection_paused"
+            && ScreenPrecondition.blockedReason(from: [
+                textBox("Connection", 0.10, 0.20, 0.50, 0.24),
+                textBox("Paused", 0.10, 0.2299, 0.50, 0.2699),
+            ]) == nil
+            && ScreenPrecondition.blockedReason(from: [
+                textBox("Connection", 0.10, 0.20, 0.50, 0.24),
+                textBox("Paused", 0.10, 0.2999, 0.50, 0.3399),
+            ]) == "connection_paused"
+            && ScreenPrecondition.blockedReason(from: [
+                textBox("Connection", 0.10, 0.20, 0.50, 0.24),
+                textBox("Paused", 0.10, 0.3001, 0.50, 0.3401),
+            ]) == nil
+        let malformedGeometryCases: [[[String: Any]]] = [
+            [
+                [
+                    "text": "Connection",
+                    "bbox": ["x0": false, "y0": 0.20, "x1": 0.16, "y1": 0.24],
+                ],
+                textBox("Paused", 0.17, 0.20, 0.40, 0.24),
+            ],
+            [
+                textBox("Connection", 0.10, 0.20, 0.16, 0.24),
+                [
+                    "text": "Paused",
+                    "bbox": ["x0": 0.17, "y0": 0.20, "x1": true, "y1": 0.24],
+                ],
+            ],
+            [
+                [
+                    "text": "Connection",
+                    "bbox": ["x0": 0.10, "y0": false, "x1": 0.16, "y1": 0.04],
+                ],
+                [
+                    "text": "Paused",
+                    "bbox": ["x0": 0.17, "y0": false, "x1": 0.40, "y1": 0.04],
+                ],
+            ],
+            [
+                [
+                    "text": "Connection",
+                    "bbox": ["x0": 0.10, "y0": 0.20, "x1": 0.16, "y1": true],
+                ],
+                [
+                    "text": "Paused",
+                    "bbox": ["x0": 0.17, "y0": 0.20, "x1": 0.40, "y1": true],
+                ],
+            ],
+            [
+                [
+                    "text": "Connection",
+                    "bbox": ["x0": "0.10", "y0": 0.20, "x1": 0.16, "y1": 0.24],
+                ],
+                textBox("Paused", 0.17, 0.20, 0.40, 0.24),
+            ],
+            [
+                [
+                    "text": "Connection",
+                    "bbox": ["x0": Double.nan, "y0": 0.20, "x1": 0.16, "y1": 0.24],
+                ],
+                textBox("Paused", 0.17, 0.20, 0.40, 0.24),
+            ],
+            [
+                ["text": "Connection", "bbox": ["x0": 0.10, "y0": 0.20, "x1": 0.16]],
+                textBox("Paused", 0.17, 0.20, 0.40, 0.24),
+            ],
+            [
+                textBox("Connection", 0.16, 0.20, 0.10, 0.24),
+                textBox("Paused", 0.17, 0.20, 0.40, 0.24),
+            ],
+            [
+                textBox("Connection", -0.10, 0.20, 0.16, 0.24),
+                textBox("Paused", 0.17, 0.20, 0.40, 0.24),
+            ],
+        ]
+        let hostBlockerMalformedGeometryPassed = malformedGeometryCases.allSatisfy {
+            ScreenPrecondition.blockedReason(from: $0) == nil
         }
         let hostBlockerFallbackTriggerPassed = ScreenPrecondition.needsAccurateBlockerVerification(from: [
             ["text": "ConnectbJn"],
@@ -418,7 +524,8 @@ enum Diagnostics {
                 && spotlightSelectionPassed && spotlightEntryPassed
                 && normalizedRemapPassed && preparedWindowIdentityPassed
                 && timeoutIsolationPassed && windowCaptureFallbackPassed
-                && hostBlockerPassed && hostBlockerGeometryPassed
+                && hostBlockerPassed && hostBlockerGeometryPassed && hostBlockerBoundaryPassed
+                && hostBlockerMalformedGeometryPassed
                 && hostBlockerFallbackTriggerPassed && ocrTwoPassEvidencePassed,
             "windowSelection": selectionPassed,
             "coordinateRoundTrip": coordinatesPassed,
@@ -446,6 +553,8 @@ enum Diagnostics {
             "windowOnlyCaptureFallback": windowCaptureFallbackPassed,
             "hostBlockerDetection": hostBlockerPassed,
             "hostBlockerGeometryGrouping": hostBlockerGeometryPassed,
+            "hostBlockerGeometryBoundaries": hostBlockerBoundaryPassed,
+            "hostBlockerMalformedGeometry": hostBlockerMalformedGeometryPassed,
             "hostBlockerFallbackTrigger": hostBlockerFallbackTriggerPassed,
             "ocrTwoPassEvidence": ocrTwoPassEvidencePassed,
             "selectedWindowId": selected.map { Int($0.windowId) } ?? -1,

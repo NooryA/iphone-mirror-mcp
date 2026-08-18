@@ -22,6 +22,10 @@ _BLOCKED_TEXT_MARKERS = (
     ("connection paused", "connection_paused"),
 )
 
+# Vision boxes for neighboring glyph runs can overlap slightly. Bound that tolerance by text
+# height so genuine splits join without accepting nested or duplicate observations.
+_MAXIMUM_ADJACENT_BOX_OVERLAP_SCALE = 0.25
+
 
 @dataclass(frozen=True)
 class _PositionedText:
@@ -227,8 +231,10 @@ def _adjacent_text_runs(matches: list[dict[str, Any]]) -> list[list[_PositionedT
 
 
 def _horizontally_adjacent(left: _PositionedText, right: _PositionedText) -> bool:
+    minimum_gap = -_MAXIMUM_ADJACENT_BOX_OVERLAP_SCALE * min(left.height, right.height)
     maximum_gap = max(0.015, 1.75 * max(left.height, right.height))
-    return right.x0 - left.x1 <= maximum_gap
+    gap = right.x0 - left.x1
+    return minimum_gap <= gap <= maximum_gap
 
 
 def _wraps_from(upper: list[_PositionedText], lower: list[_PositionedText]) -> bool:
@@ -238,9 +244,14 @@ def _wraps_from(upper: list[_PositionedText], lower: list[_PositionedText]) -> b
     upper_x1 = max(item.x1 for item in upper)
     lower_x0 = min(item.x0 for item in lower)
     lower_x1 = max(item.x1 for item in lower)
+    upper_center_y = sum(item.center_y for item in upper) / len(upper)
+    lower_center_y = sum(item.center_y for item in lower) / len(lower)
+    if lower_center_y <= upper_center_y:
+        return False
     vertical_gap = min(item.y0 for item in lower) - max(item.y1 for item in upper)
+    minimum_vertical_gap = -_MAXIMUM_ADJACENT_BOX_OVERLAP_SCALE * min(upper_height, lower_height)
     maximum_vertical_gap = max(0.02, 1.5 * max(upper_height, lower_height))
-    if not 0 <= vertical_gap <= maximum_vertical_gap:
+    if not minimum_vertical_gap <= vertical_gap <= maximum_vertical_gap:
         return False
     maximum_horizontal_gap = max(0.03, 2 * max(upper_height, lower_height))
     return lower_x0 <= upper_x1 + maximum_horizontal_gap and lower_x1 >= upper_x0 - maximum_horizontal_gap

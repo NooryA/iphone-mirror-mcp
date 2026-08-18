@@ -1,4 +1,5 @@
 import CryptoKit
+import CoreFoundation
 import Foundation
 
 struct ScreenPreconditionState {
@@ -26,6 +27,10 @@ struct ScreenPreconditionState {
 }
 
 enum ScreenPrecondition {
+    // Vision boxes for neighboring glyph runs can overlap slightly. Bound that tolerance by
+    // text height so genuine splits join without accepting nested or duplicate observations.
+    private static let maximumAdjacentBoxOverlapScale = 0.25
+
     private struct PositionedText {
         let text: String
         let x0: Double
@@ -211,10 +216,10 @@ enum ScreenPrecondition {
     private static func positionedText(_ match: [String: Any]) -> PositionedText? {
         guard let text = match["text"] as? String,
               let box = match["bbox"] as? [String: Any],
-              let x0 = (box["x0"] as? NSNumber)?.doubleValue,
-              let y0 = (box["y0"] as? NSNumber)?.doubleValue,
-              let x1 = (box["x1"] as? NSNumber)?.doubleValue,
-              let y1 = (box["y1"] as? NSNumber)?.doubleValue,
+              let x0 = numericCoordinate(box["x0"]),
+              let y0 = numericCoordinate(box["y0"]),
+              let x1 = numericCoordinate(box["x1"]),
+              let y1 = numericCoordinate(box["y1"]),
               x0.isFinite, y0.isFinite, x1.isFinite, y1.isFinite,
               x0 >= 0, y0 >= 0, x1 <= 1, y1 <= 1,
               x0 < x1, y0 < y1 else { return nil }
@@ -223,15 +228,27 @@ enum ScreenPrecondition {
         return PositionedText(text: normalized, x0: x0, y0: y0, x1: x1, y1: y1)
     }
 
+    private static func numericCoordinate(_ value: Any?) -> Double? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        return number.doubleValue
+    }
+
     private static func horizontallyAdjacent(_ left: PositionedText, _ right: PositionedText) -> Bool {
+        let minimumGap = -maximumAdjacentBoxOverlapScale * min(left.height, right.height)
         let maximumGap = max(0.015, 1.75 * max(left.height, right.height))
-        return right.x0 - left.x1 <= maximumGap
+        let gap = right.x0 - left.x1
+        return gap >= minimumGap && gap <= maximumGap
     }
 
     private static func wrapsFrom(_ upper: TextLine, to lower: TextLine) -> Bool {
+        guard lower.centerY > upper.centerY else { return false }
+        let minimumVerticalGap = -maximumAdjacentBoxOverlapScale
+            * min(upper.meanHeight, lower.meanHeight)
         let maximumVerticalGap = max(0.02, 1.5 * max(upper.meanHeight, lower.meanHeight))
         let verticalGap = lower.y0 - upper.y1
-        guard verticalGap >= 0, verticalGap <= maximumVerticalGap else { return false }
+        guard verticalGap >= minimumVerticalGap,
+              verticalGap <= maximumVerticalGap else { return false }
 
         let maximumHorizontalGap = max(0.03, 2 * max(upper.meanHeight, lower.meanHeight))
         return lower.x0 <= upper.x1 + maximumHorizontalGap
