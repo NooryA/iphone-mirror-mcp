@@ -22,21 +22,40 @@ enum Input {
     }
 
     static func tap(x: Double, y: Double, mode: InputMode, overlay: Bool = true) throws -> [String: Any] {
-        guard mode != .background else {
-            throw MirrorError.invalidArgs(
-                "background tap events are not delivered to iOS; use hid or skylight"
-            )
-        }
+        try requireTapMode(mode)
         let win = try WindowFinder.find()
         guard WindowFinder.contains(win, x: x, y: y) else { throw MirrorError.outsideWindow }
-        let point = CGPoint(x: x, y: y)
+        return try tap(point: CGPoint(x: x, y: y), in: win, mode: mode, overlay: overlay)
+    }
+
+    static func tapNormalized(
+        x: Double,
+        y: Double,
+        mode: InputMode,
+        overlay: Bool = true
+    ) throws -> [String: Any] {
+        try requireTapMode(mode)
+        let win = try WindowFinder.find()
+        let point = try normalizedPoint(x: x, y: y, in: win)
+        var result = try tap(point: point, in: win, mode: mode, overlay: overlay)
+        result["normalizedX"] = x
+        result["normalizedY"] = y
+        return result
+    }
+
+    private static func tap(
+        point: CGPoint,
+        in win: MirrorWindow,
+        mode: InputMode,
+        overlay: Bool
+    ) throws -> [String: Any] {
         try requireAccessibility()
         let extras = try postClick(to: win, at: point, mode: mode, overlay: overlay)
         var result: [String: Any] = [
             "ok": true,
             "mode": mode.rawValue,
-            "x": x,
-            "y": y,
+            "x": point.x,
+            "y": point.y,
             "windowId": win.windowId,
             "pid": win.pid,
             "accessibilityTrusted": true,
@@ -62,10 +81,27 @@ enum Input {
     static func scroll(x: Double, y: Double, delta: Int, ticks: Int) throws -> [String: Any] {
         let win = try WindowFinder.find()
         guard WindowFinder.contains(win, x: x, y: y) else { throw MirrorError.outsideWindow }
+        return try scroll(point: CGPoint(x: x, y: y), in: win, delta: delta, ticks: ticks)
+    }
+
+    static func scrollNormalized(x: Double, y: Double, delta: Int, ticks: Int) throws -> [String: Any] {
+        let win = try WindowFinder.find()
+        let point = try normalizedPoint(x: x, y: y, in: win)
+        var result = try scroll(point: point, in: win, delta: delta, ticks: ticks)
+        result["normalizedX"] = x
+        result["normalizedY"] = y
+        return result
+    }
+
+    private static func scroll(
+        point: CGPoint,
+        in win: MirrorWindow,
+        delta: Int,
+        ticks: Int
+    ) throws -> [String: Any] {
         try requireAccessibility()
         activate(win.pid)
         let saved = saveWarpPoint()
-        let point = CGPoint(x: x, y: y)
         guard cliclickMove(to: point, in: win) else {
             throw MirrorError.invalidArgs(
                 "cliclick is required for reliable iPhone Mirroring scrolling"
@@ -90,8 +126,8 @@ enum Input {
             : false
         return [
             "ok": true,
-            "x": x,
-            "y": y,
+            "x": point.x,
+            "y": point.y,
             "delta": delta,
             "ticks": count,
             "backend": "scroll-wheel",
@@ -99,6 +135,28 @@ enum Input {
             "cursorMoved": !shouldRestorePointer || userInterference,
             "userInterferenceDetected": userInterference,
         ]
+    }
+
+    static func normalizedPoint(x: Double, y: Double, in window: MirrorWindow) throws -> CGPoint {
+        guard x.isFinite, y.isFinite, x >= 0, x <= 1, y >= 0, y <= 1 else {
+            throw MirrorError.invalidArgs("normalized coordinates must be finite values between 0 and 1")
+        }
+        let content = WindowFinder.contentRect(window)
+        guard content.width > 0, content.height > 0 else {
+            throw MirrorError.invalidArgs("iPhone Mirroring content geometry is empty")
+        }
+        return CGPoint(
+            x: min(content.maxX.nextDown, content.minX + x * content.width),
+            y: min(content.maxY.nextDown, content.minY + y * content.height)
+        )
+    }
+
+    private static func requireTapMode(_ mode: InputMode) throws {
+        guard mode != .background else {
+            throw MirrorError.invalidArgs(
+                "background tap events are not delivered to iOS; use hid or skylight"
+            )
+        }
     }
 
     static func typeText(_ text: String, mode: InputMode) throws -> [String: Any] {

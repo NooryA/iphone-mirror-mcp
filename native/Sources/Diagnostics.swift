@@ -41,13 +41,85 @@ enum Diagnostics {
             )
         )
         let cliclickEdgesPassed = edgePoint == (-762, 1_805)
+        let parserPassed: Bool
+        do {
+            let parsed = try MirrorCtl.parseFlags(
+                ["--query", "--definitely-not-text", "--limit", "8"],
+                allowed: ["query", "limit"]
+            )
+            parserPassed = parsed["query"] == "--definitely-not-text" && parsed["limit"] == "8"
+        } catch {
+            parserPassed = false
+        }
+        let parserRejectsInvalid: Bool
+        do {
+            _ = try MirrorCtl.parseFlags(["--query", "one", "--query", "two"], allowed: ["query"])
+            parserRejectsInvalid = false
+        } catch {
+            parserRejectsInvalid = true
+        }
+        let blackSignature = "rgb16:" + String(repeating: "00", count: 16 * 16 * 3)
+        let whiteSignature = "rgb16:" + String(repeating: "ff", count: 16 * 16 * 3)
+        let redSignature = "rgb16:" + String(repeating: "ff0000", count: 16 * 16)
+        let blueSignature = "rgb16:" + String(repeating: "0000ff", count: 16 * 16)
+        let visualComparisonPassed = (try? VisualComparison.distance(blackSignature, whiteSignature)) == 255
+            && ((try? VisualComparison.distance(redSignature, blueSignature)) ?? 0)
+                > VisualComparison.materialDifferenceThreshold
+        let spotlightMatches: [[String: Any]] = [
+            ["text": "Settings", "cx": 0.5, "cy": 0.06, "confidence": 0.99],
+            ["text": "Settings", "cx": 0.25, "cy": 0.24, "confidence": 0.95],
+        ]
+        let spotlightSelectionPassed = (MirrorCtl.selectSpotlightResult(
+            spotlightMatches,
+            appName: "Settings"
+        )?["cy"] as? Double) == 0.24
+        let spotlightEntryPassed = MirrorCtl.isSpotlightEntryVisible([
+            ["text": "Siri Suggestions"],
+            ["text": "Show Less"],
+            ["text": "Search"],
+        ]) && !MirrorCtl.isSpotlightEntryVisible([["text": "Search"]])
+        let initialWindow = MirrorWindow(
+            pid: pid,
+            windowId: 9,
+            x: 100,
+            y: 200,
+            width: 300,
+            height: 652,
+            ownerName: WindowFinder.ownerName,
+            windowName: WindowFinder.ownerName,
+            layer: 0
+        )
+        var movedWindow = initialWindow
+        movedWindow.x = -500
+        movedWindow.y = 450
+        let initialPoint = try? Input.normalizedPoint(x: 0.5, y: 0.5, in: initialWindow)
+        let movedPoint = try? Input.normalizedPoint(x: 0.5, y: 0.5, in: movedWindow)
+        let normalizedRemapPassed = initialPoint?.x == 250
+            && movedPoint?.x == -350
+            && movedPoint?.y == 802
+        let timeoutIsolationPassed = Capture.timeoutIsolationSelfTest()
+        let hostBlockerPassed = ScreenPrecondition.blockedReason(from: [
+            ["text": "Connection Paused"],
+            ["text": "Resume"],
+        ]) == "connection_paused"
         return [
             "ok": selectionPassed && coordinatesPassed
-                && cliclickCoordinatesPassed && cliclickEdgesPassed,
+                && cliclickCoordinatesPassed && cliclickEdgesPassed
+                && parserPassed && parserRejectsInvalid && visualComparisonPassed
+                && spotlightSelectionPassed && spotlightEntryPassed
+                && normalizedRemapPassed && timeoutIsolationPassed && hostBlockerPassed,
             "windowSelection": selectionPassed,
             "coordinateRoundTrip": coordinatesPassed,
             "cliclickNegativeCoordinates": cliclickCoordinatesPassed,
             "cliclickHalfOpenEdges": cliclickEdgesPassed,
+            "argumentParser": parserPassed,
+            "argumentParserRejectsInvalid": parserRejectsInvalid,
+            "visualComparison": visualComparisonPassed,
+            "spotlightResultSelection": spotlightSelectionPassed,
+            "spotlightEntryDetection": spotlightEntryPassed,
+            "normalizedWindowRemap": normalizedRemapPassed,
+            "captureTimeoutIsolation": timeoutIsolationPassed,
+            "hostBlockerDetection": hostBlockerPassed,
             "selectedWindowId": selected.map { Int($0.windowId) } ?? -1,
         ]
     }
@@ -132,6 +204,8 @@ enum Diagnostics {
             "running": true,
             "windowVisible": true,
             "connected": phoneLike,
+            "connectedHeuristic": phoneLike,
+            "connectionEvidence": "window-geometry-only",
             "pid": window.pid,
             "windowId": window.windowId,
             "x": window.x,

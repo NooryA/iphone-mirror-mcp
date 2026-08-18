@@ -9,8 +9,10 @@
 - Serialize global input across processes, including the full Spotlight/open-app sequence, and avoid
   overwriting detected user pointer movement.
 - Add optional SHA-256 screen preconditions for state-sensitive actions.
-- Use perceptual visual hashes for OCR label taps so live-video noise does not trigger false stale-screen failures.
-- Detect known iPhone Mirroring host blocking screens before input.
+- Execute host-state validation, fresh normalized mapping, and supported input under one native cross-process lock.
+- Use structural hashes plus versioned absolute-color signatures so live-video noise is ignored without missing
+  flat/color-only screen transitions.
+- Detect known iPhone Mirroring host blocking screens before input, including live-observed Connection Paused.
 - Reject invalid coordinates and bound durations, waits, scrolling, text, OCR, and search regions.
 - Discover `cliclick` across Apple Silicon, Intel Homebrew, `PATH`, and explicit configuration.
 - Route supported taps, scrolling, and typing through the live-verified `cliclick` backend and fail closed
@@ -23,7 +25,14 @@
   success for `CGEvent.postToPid` events that iOS never receives.
 - Require the verified pointer backend for scrolling instead of silently falling back to an
   unverified internal cursor warp.
-- Make `open_app` click the OCR-confirmed Spotlight top result instead of assuming Return launches it.
+- Make `open_app` confirm Spotlight before typing, exclude the query field, click an exact result, and confirm
+  the transition away from Spotlight instead of assuming Return or a posted event worked.
+- Remove the unverified menu keyboard-shortcut fallback; Accessibility menu failures now fail closed.
+- Preserve arbitrary leading-dash and Unicode CLI values while rejecting unknown, duplicate, and missing flags.
+- Return explicit MCP image content plus structured metadata and exercise every image-tool family over stdio.
+- Isolate timed-out ScreenCaptureKit work from the fallback destination to prevent late-writer races.
+- Bundle native source in wheels and compile a signed, architecture-specific helper into the user cache on first use.
+- Keep the Python package and distribution version synchronized.
 - Remove the unused private SkyLight framework event path while retaining the `skylight` mode name for compatibility.
 - Remove screenshot temporary files deterministically.
 - Add macOS CI, lint/format enforcement, concurrency stress tests, and coverage enforcement.

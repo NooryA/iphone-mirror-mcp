@@ -11,6 +11,8 @@ uv run ruff format --check .
 ./scripts/build-native.sh
 ./dist/mirror-ctl self-test
 uv run pytest -q --cov=iphone_mirror_mcp --cov-report=term-missing --cov-fail-under=80
+uv build
+./scripts/smoke-wheel.sh
 ```
 
 Pull requests that change input or capture behavior should include regression coverage and note which of these were verified:

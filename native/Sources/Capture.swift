@@ -99,7 +99,7 @@ enum Capture {
                 config.capturesAudio = false
                 let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
                 let cropped = cropTitlebar(image, titlebarPoints: MirrorMetrics.titlebarPoints, scale: scale)
-                try writePNG(cropped, to: url)
+                outcome.set(cropped)
             } catch {
                 outcome.set(error)
             }
@@ -108,9 +108,10 @@ enum Capture {
             throw MirrorError.captureFailed("ScreenCaptureKit timed out after 8 seconds")
         }
         if let capturedError = outcome.error { throw capturedError }
-        if !FileManager.default.fileExists(atPath: url.path) {
-            throw MirrorError.captureFailed("ScreenCaptureKit produced no file")
+        guard let image = outcome.image else {
+            throw MirrorError.captureFailed("ScreenCaptureKit produced no image")
         }
+        try writePNG(image, to: url)
     }
 
     private static func pngPointSize(at url: URL, scale: CGFloat) -> (Double, Double)? {
@@ -118,6 +119,46 @@ enum Capture {
               let image = CGImageSourceCreateImageAtIndex(src, 0, nil),
               scale > 0 else { return nil }
         return (Double(image.width) / Double(scale), Double(image.height) / Double(scale))
+    }
+
+    static func timeoutIsolationSelfTest() -> Bool {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iphone-mirror-timeout-self-test-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let semaphore = DispatchSemaphore(value: 0)
+        let outcome = CaptureOutcome()
+        Task {
+            usleep(40_000)
+            if let image = onePixelImage() { outcome.set(image) }
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + .milliseconds(1)) == .timedOut else {
+            return false
+        }
+        let fallback = Data("fallback-writer-won".utf8)
+        do {
+            try fallback.write(to: url, options: .atomic)
+        } catch {
+            return false
+        }
+        guard semaphore.wait(timeout: .now() + .seconds(1)) == .success else { return false }
+        return (try? Data(contentsOf: url)) == fallback && outcome.image != nil
+    }
+
+    private static func onePixelImage() -> CGImage? {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(
+            data: nil,
+            width: 1,
+            height: 1,
+            bitsPerComponent: 8,
+            bytesPerRow: 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
+        return context.makeImage()
     }
 
     private static func writePNG(_ image: CGImage, to url: URL) throws {
@@ -136,11 +177,24 @@ enum Capture {
 private final class CaptureOutcome: @unchecked Sendable {
     private let lock = NSLock()
     private var storedError: Error?
+    private var storedImage: CGImage?
 
     var error: Error? {
         lock.lock()
         defer { lock.unlock() }
         return storedError
+    }
+
+    var image: CGImage? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedImage
+    }
+
+    func set(_ image: CGImage) {
+        lock.lock()
+        storedImage = image
+        lock.unlock()
     }
 
     func set(_ error: Error) {

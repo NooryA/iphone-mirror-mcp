@@ -6,6 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "NooryA" }]
+classifiers = [
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.12",
+]
 dependencies = [
     "mcp>=2.0.0",
     "pillow>=12.3.0",
@@ -27,6 +31,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/iphone_mirror_mcp"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"native/Sources" = "iphone_mirror_mcp/native/Sources"
+"scripts/build-native.sh" = "iphone_mirror_mcp/native/build-native.sh"
 
 [tool.hatch.build.targets.sdist]
 exclude = [

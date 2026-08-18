@@ -4,7 +4,7 @@
 
 iPhone Mirror MCP intentionally controls only the visible `com.apple.ScreenContinuity` phone window. It exposes no arbitrary shell, filesystem, network, credential, or whole-desktop tool.
 
-The helper validates the selected window and every pointer coordinate, serializes global input, rejects stale screenshot preconditions, and stops on recognized iPhone Mirroring host blocking states. macOS still treats Accessibility and Screen Recording as powerful permissions; grant them only to MCP clients you trust.
+The helper validates the selected window and every pointer coordinate, serializes global input, and performs host-state validation, fresh normalized-coordinate mapping, and supported input in one native transaction. Exact or visual preconditions reject stale targets. macOS still treats Accessibility and Screen Recording as powerful permissions; grant them only to MCP clients you trust.
 
 ## Reporting a vulnerability
 

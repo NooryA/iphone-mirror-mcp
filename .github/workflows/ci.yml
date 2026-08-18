@@ -20,9 +20,12 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --all-groups
+      - run: uv lock --check
+      - run: uv sync --frozen --all-groups
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: ./scripts/build-native.sh
       - run: ./dist/mirror-ctl self-test
       - run: uv run pytest -q --cov=iphone_mirror_mcp --cov-report=term-missing --cov-fail-under=80
+      - run: uv build
+      - run: ./scripts/smoke-wheel.sh

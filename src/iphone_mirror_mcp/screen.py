@@ -5,6 +5,9 @@ from typing import Any
 
 from PIL import Image
 
+VISUAL_SIGNATURE_VERSION = "rgb16"
+VISUAL_SIGNATURE_SIZE = 16
+
 _BLOCKED_TEXT_MARKERS = (
     ("lock your iphone to connect", "iphone_in_use"),
     ("iphone in use", "iphone_in_use"),
@@ -13,6 +16,7 @@ _BLOCKED_TEXT_MARKERS = (
     ("welcome to iphone mirroring", "setup_required"),
     ("iphone mirroring not available", "mirroring_unavailable"),
     ("unable to connect to iphone", "connection_unavailable"),
+    ("connection paused", "connection_paused"),
 )
 
 
@@ -40,6 +44,37 @@ def visual_hash_file(path: str) -> str:
 def visual_hash_distance(left: str, right: str) -> int:
     """Return the Hamming distance between two 64-bit visual hashes."""
     return (int(left, 16) ^ int(right, 16)).bit_count()
+
+
+def visual_signature_file(path: str) -> str:
+    """Sample absolute RGB values so flat/color-only transitions remain visible."""
+    with Image.open(path) as image:
+        rgb = image.convert("RGB")
+        width, height = rgb.size
+        pixels = rgb.load()
+        samples = bytearray()
+        for row in range(VISUAL_SIGNATURE_SIZE):
+            y = min(height - 1, int((row + 0.5) * height / VISUAL_SIGNATURE_SIZE))
+            for column in range(VISUAL_SIGNATURE_SIZE):
+                x = min(width - 1, int((column + 0.5) * width / VISUAL_SIGNATURE_SIZE))
+                samples.extend(pixels[x, y])
+    return f"{VISUAL_SIGNATURE_VERSION}:{samples.hex()}"
+
+
+def visual_signature_distance(left: str, right: str) -> float:
+    """Return mean absolute RGB difference between versioned visual signatures."""
+    prefix = f"{VISUAL_SIGNATURE_VERSION}:"
+    if not left.startswith(prefix) or not right.startswith(prefix):
+        raise ValueError(f"visual signatures must use the {VISUAL_SIGNATURE_VERSION} format")
+    try:
+        left_bytes = bytes.fromhex(left[len(prefix) :])
+        right_bytes = bytes.fromhex(right[len(prefix) :])
+    except ValueError as exc:
+        raise ValueError("visual signature contains invalid hexadecimal data") from exc
+    expected_length = VISUAL_SIGNATURE_SIZE * VISUAL_SIGNATURE_SIZE * 3
+    if len(left_bytes) != expected_length or len(right_bytes) != expected_length:
+        raise ValueError(f"visual signatures must contain {expected_length} RGB bytes")
+    return sum(abs(a - b) for a, b in zip(left_bytes, right_bytes, strict=True)) / expected_length
 
 
 def png_pixel_size(path: str) -> tuple[int, int]:
@@ -70,6 +105,7 @@ def annotate_screenshot(result: dict[str, Any], path: str) -> dict[str, Any]:
     result["pngHeight"] = height
     result["sha256"] = sha256_file(path)
     result["visualHash"] = visual_hash_file(path)
+    result["visualSignature"] = visual_signature_file(path)
     result["iphoneInUseHeuristic"] = detect_iphone_in_use(path)
     result["iphoneInUse"] = False
     return result
@@ -116,8 +152,13 @@ def find_pixels(
         pixels = crop.load()
         crop_w, crop_h = crop.size
 
-    xs: list[int] = []
-    ys: list[int] = []
+    count = 0
+    sum_x = 0
+    sum_y = 0
+    min_x = width
+    max_x = -1
+    min_y = height
+    max_y = -1
     for local_y in range(crop_h):
         for local_x in range(crop_w):
             pixel_r, pixel_g, pixel_b = pixels[local_x, local_y]
@@ -135,25 +176,30 @@ def find_pixels(
                 )
             ):
                 continue
-            xs.append(left + local_x)
-            ys.append(top + local_y)
+            x = left + local_x
+            y = top + local_y
+            count += 1
+            sum_x += x
+            sum_y += y
+            min_x = min(min_x, x)
+            max_x = max(max_x, x)
+            min_y = min(min_y, y)
+            max_y = max(max_y, y)
 
-    found = len(xs) >= min_pixels
+    found = count >= min_pixels
     if not found:
         return {
             "found": False,
-            "n": len(xs),
+            "n": count,
             "cx": None,
             "cy": None,
             "bbox": None,
         }
-    min_x, max_x = min(xs), max(xs)
-    min_y, max_y = min(ys), max(ys)
     return {
         "found": True,
-        "n": len(xs),
-        "cx": (sum(xs) / len(xs)) / width,
-        "cy": (sum(ys) / len(ys)) / height,
+        "n": count,
+        "cx": (sum_x / count) / width,
+        "cy": (sum_y / count) / height,
         "bbox": {
             "x0": min_x / width,
             "y0": min_y / height,

@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from iphone_mirror_mcp.ctl import BINARY
 
@@ -50,14 +51,56 @@ def test_doctor_reports_dependencies_displays_and_warnings() -> None:
 def test_native_self_test_covers_window_selection_and_coordinate_round_trip() -> None:
     process, payload = _run("self-test")
     assert process.returncode == 0
-    assert payload == {
-        "cliclickHalfOpenEdges": True,
-        "cliclickNegativeCoordinates": True,
-        "coordinateRoundTrip": True,
-        "ok": True,
-        "selectedWindowId": 3,
-        "windowSelection": True,
-    }
+    assert payload["ok"] is True
+    assert payload["selectedWindowId"] == 3
+    for check in (
+        "windowSelection",
+        "coordinateRoundTrip",
+        "cliclickNegativeCoordinates",
+        "cliclickHalfOpenEdges",
+        "argumentParser",
+        "argumentParserRejectsInvalid",
+        "visualComparison",
+        "spotlightResultSelection",
+        "spotlightEntryDetection",
+        "normalizedWindowRemap",
+        "captureTimeoutIsolation",
+        "hostBlockerDetection",
+    ):
+        assert payload[check] is True
+
+
+@pytest.mark.parametrize("value", ["", "--definitely-not-text", "-", "a:b", "日本語🙂", "--limit"])
+def test_native_parser_preserves_arbitrary_flag_values(tmp_path: Path, value: str) -> None:
+    image = tmp_path / "blank.png"
+    Image.new("RGB", (32, 32), (0, 0, 0)).save(image)
+    process, payload = _run(
+        "ocr",
+        "--image",
+        str(image),
+        "--query",
+        value,
+        "--limit",
+        "1",
+    )
+    assert process.returncode == 0
+    assert payload["query"] == value
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (("screenshot", "--unknown", "value"), "unknown flag"),
+        (("screenshot", "--out", "one", "--out", "two"), "duplicate flag"),
+        (("screenshot", "--out"), "missing value"),
+        (("status", "positional"), "expected a --flag"),
+    ],
+)
+def test_native_parser_rejects_invalid_flags(args: tuple[str, ...], message: str) -> None:
+    process, payload = _run(*args)
+    assert process.returncode == 1
+    assert payload["ok"] is False
+    assert message in payload["error"]
 
 
 def test_unknown_input_mode_is_rejected_before_any_pointer_action() -> None:

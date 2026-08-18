@@ -1,3 +1,4 @@
+import base64
 import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -28,7 +29,7 @@ def _install_fake_native(
         del timeout
         calls.append(args)
         command = args[0]
-        if command == "screenshot":
+        if command in {"screenshot", "tap-and-capture"}:
             output = args[args.index("--out") + 1]
             image = Image.new("RGB", (60, 120), (0, 0, 0))
             for pixel_y in range(120):
@@ -38,7 +39,7 @@ def _install_fake_native(
                     elif (pixel_x + pixel_y) % 5 == 0:
                         image.putpixel((pixel_x, pixel_y), (220, 80, 30))
             image.save(output)
-            return {
+            result = {
                 "ok": True,
                 "x": 100,
                 "y": 148,
@@ -49,6 +50,14 @@ def _install_fake_native(
                 "contentWidth": 300,
                 "contentHeight": 600,
             }
+            if command == "tap-and-capture":
+                result["command"] = command
+                result["preflightSha256"] = "a" * 64
+                result["tap"] = {"ok": True}
+                if "--expected-image" in args:
+                    expected_path = args[args.index("--expected-image") + 1]
+                    result["expectedImageReadable"] = Path(expected_path).is_file()
+            return result
         if command == "ocr":
             query = args[args.index("--query") + 1]
             matches = ocr_matches or [] if not query else ([label_hit] if label_hit else [])
@@ -72,11 +81,17 @@ def _install_fake_native(
             }
         if command == "open-app":
             return {"ok": True, "command": command, "app": args[args.index("--name") + 1]}
-        return {"ok": True, "command": command}
+        return {"ok": True, "command": command, "preflightSha256": "a" * 64}
 
     monkeypatch.setattr(server.tempfile, "mkstemp", local_mkstemp)
     monkeypatch.setattr(server, "run_ctl", fake_run_ctl)
     return calls
+
+
+def _metadata(payload: Any) -> dict[str, Any]:
+    assert payload.is_error is False
+    assert payload.structured_content is not None
+    return payload.structured_content
 
 
 def test_capture_file_is_removed_after_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -107,40 +122,10 @@ def test_capture_file_is_removed_after_native_error(monkeypatch: pytest.MonkeyPa
 def test_image_payload_survives_temp_cleanup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _install_fake_native(monkeypatch, tmp_path)
     payload = server.mirror_screenshot()
-    assert payload[0]["pngWidth"] == 60
-    assert payload[1].data is not None
-    assert payload[1].data.startswith(b"\x89PNG")
+    assert _metadata(payload)["pngWidth"] == 60
+    assert payload.content[1].type == "image"
+    assert base64.b64decode(payload.content[1].data).startswith(b"\x89PNG")
     assert list(tmp_path.iterdir()) == []
-
-
-def test_guard_rejects_a_stale_screen(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _install_fake_native(monkeypatch, tmp_path)
-    with pytest.raises(server.MirrorStateError, match="screen changed"):
-        server._guard_interaction("0" * 64)
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_visual_guard_allows_stable_frames_and_rejects_large_changes(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    _install_fake_native(monkeypatch, tmp_path)
-    with server._capture_file() as (screen, _path):
-        visual_hash = str(screen["visualHash"])
-    assert server._guard_interaction(expected_visual_hash=visual_hash)["visualHash"] == visual_hash
-
-    inverse = f"{int(visual_hash, 16) ^ ((1 << 64) - 1):016x}"
-    with pytest.raises(server.MirrorStateError, match="changed visually"):
-        server._guard_interaction(expected_visual_hash=inverse)
-
-
-def test_guard_rejects_known_host_blocking_screen(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    _install_fake_native(monkeypatch, tmp_path, ocr_matches=[{"text": "iCloud Signed Out"}])
-    with pytest.raises(server.MirrorStateError, match="icloud_signed_out"):
-        server._guard_interaction()
 
 
 def test_visual_helpers_report_host_blocking_state(
@@ -183,11 +168,40 @@ def test_wait_for_change_uses_visual_distance(
     monkeypatch.setattr(server, "_capture_file", fake_capture)
     monkeypatch.setattr(server.time, "sleep", lambda _: None)
     payload = server.wait_for_change(timeout_ms=1_000, interval_ms=50)
-    result = payload[0]
+    result = _metadata(payload)
     assert result["changed"] is True
     assert result["sha256Changed"] is True
     assert result["visualHashDistance"] > server.MAX_VISUAL_HASH_DISTANCE
+    assert result["visualSignatureDistance"] > server.MAX_VISUAL_SIGNATURE_DISTANCE
     assert result["timedOut"] is False
+
+
+def test_wait_for_change_detects_flat_black_to_white_transition(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_fake_native(monkeypatch, tmp_path)
+    baseline_path = tmp_path / "black.png"
+    changed_path = tmp_path / "white.png"
+    Image.new("RGB", (64, 128), "black").save(baseline_path)
+    Image.new("RGB", (64, 128), "white").save(changed_path)
+    capture_count = 0
+
+    @contextmanager
+    def fake_capture() -> Any:
+        nonlocal capture_count
+        path = baseline_path if capture_count == 0 else changed_path
+        capture_count += 1
+        result: dict[str, Any] = {"ok": True}
+        server.annotate_screenshot(result, str(path))
+        yield result, str(path)
+
+    monkeypatch.setattr(server, "_capture_file", fake_capture)
+    monkeypatch.setattr(server.time, "sleep", lambda _: None)
+    result = _metadata(server.wait_for_change(timeout_ms=1_000, interval_ms=50))
+    assert result["changed"] is True
+    assert result["visualHashDistance"] == 0
+    assert result["visualSignatureDistance"] == 255
 
 
 def test_wait_for_change_ignores_insignificant_exact_hash_noise(
@@ -219,20 +233,25 @@ def test_wait_for_change_ignores_insignificant_exact_hash_noise(
     monkeypatch.setattr(server.time, "monotonic", lambda: next(monotonic_values))
     monkeypatch.setattr(server.time, "sleep", lambda _: None)
     payload = server.wait_for_change(timeout_ms=50, interval_ms=50)
-    result = payload[0]
+    result = _metadata(payload)
     assert result["changed"] is False
     assert result["sha256Changed"] is True
     assert result["visualHashDistance"] == 0
+    assert result["visualSignatureDistance"] <= server.MAX_VISUAL_SIGNATURE_DISTANCE
     assert result["timedOut"] is True
 
 
-def test_tap_maps_against_native_content_rect(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_tap_delegates_normalized_mapping_to_atomic_native_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     calls = _install_fake_native(monkeypatch, tmp_path)
     result = server.tap(0.5, 0.5)
-    tap_call = next(call for call in calls if call[0] == "tap")
-    assert tap_call[tap_call.index("--x") + 1] == "250.0"
-    assert tap_call[tap_call.index("--y") + 1] == "500.0"
+    tap_call = next(call for call in calls if call[0] == "tap-normalized")
+    assert tap_call[tap_call.index("--x") + 1] == "0.5"
+    assert tap_call[tap_call.index("--y") + 1] == "0.5"
     assert result["preflightSha256"]
+    assert all(call[0] != "screenshot" for call in calls)
 
 
 @pytest.mark.parametrize(
@@ -264,11 +283,6 @@ def test_expected_hash_validation() -> None:
         with pytest.raises(ValueError, match="SHA-256"):
             server._validate_expected_sha256(invalid)
 
-    assert server._validate_visual_hash("A" * 16) == "a" * 16
-    for invalid in ("", "xyz", "g" * 16, "0" * 15):
-        with pytest.raises(ValueError, match="visual hash"):
-            server._validate_visual_hash(invalid)
-
 
 def test_capture_cleanup_does_not_leave_open_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _install_fake_native(monkeypatch, tmp_path)
@@ -289,7 +303,7 @@ def test_all_public_tool_families_dispatch_with_validated_arguments(
     assert server.mirror_status()["ok"] is True
     assert server.mirror_doctor()["command"] == "doctor"
     assert server.swipe(0.2, 0.8, 0.2, 0.2)["command"] == "swipe"
-    assert server.scroll(delta=-5, ticks=3)["command"] == "scroll"
+    assert server.scroll(delta=-5, ticks=3)["command"] == "scroll-normalized"
     assert server.type_text("hello")["command"] == "type"
     assert server.press_key("return")["command"] == "key"
     assert server.press_return()["command"] == "key"
@@ -300,27 +314,30 @@ def test_all_public_tool_families_dispatch_with_validated_arguments(
     assert server.find_color(220, 80, 30, tolerance=0, min_pixels=1)["found"] is True
     assert server.find_bright(min_lum=200, min_pixels=1)["found"] is True
     assert server.find_text("Settings")["text"] == "Settings"
-    tapped = server.tap_label("Settings", settle_ms=0)
-    assert tapped[0]["ocr"]["text"] == "Settings"
-    label_tap_call = [call for call in calls if call[0] == "tap"][-1]
+    tapped = _metadata(server.tap_label("Settings", settle_ms=0))
+    assert tapped["ocr"]["text"] == "Settings"
+    assert tapped["expectedImageReadable"] is True
+    label_tap_call = [call for call in calls if call[0] == "tap-and-capture"][-1]
     assert "--expected-sha256" not in label_tap_call
-    unchanged = server.wait_for_change(timeout_ms=0)
-    assert unchanged[0]["timedOut"] is True
-    assert unchanged[0]["sha256Changed"] is False
-    assert unchanged[0]["visualHashDistance"] == 0
+    assert "--expected-image" in label_tap_call
+    unchanged = _metadata(server.wait_for_change(timeout_ms=0))
+    assert unchanged["timedOut"] is True
+    assert unchanged["sha256Changed"] is False
+    assert unchanged["visualHashDistance"] == 0
+    assert unchanged["visualSignatureDistance"] == 0
 
     dispatched = {call[0] for call in calls}
     assert {
         "status",
         "doctor",
         "swipe",
-        "scroll",
+        "scroll-normalized",
         "type",
         "key",
         "menu",
         "open-app",
         "ocr",
-        "tap",
+        "tap-and-capture",
     } <= dispatched
 
 
@@ -329,21 +346,37 @@ def test_tap_label_not_found_returns_current_screen(
     tmp_path: Path,
 ) -> None:
     _install_fake_native(monkeypatch, tmp_path)
-    payload = server.tap_label("Missing")
-    assert payload[0]["tap"]["ok"] is False
-    assert payload[0]["tap"]["error"] == "label not found"
+    payload = _metadata(server.tap_label("Missing"))
+    assert payload["tap"]["ok"] is False
+    assert payload["tap"]["error"] == "label not found"
 
 
-@pytest.mark.parametrize("text", ["", "x" * (server.MAX_TEXT_LENGTH + 1), "hello\nworld"])
+@pytest.mark.parametrize("text", ["", "x" * (server.MAX_TEXT_LENGTH + 1), "hello\nworld", "nul\0text"])
 def test_invalid_text_is_rejected_before_native_input(text: str) -> None:
     with pytest.raises(ValueError):
         server.type_text(text)
 
 
-@pytest.mark.parametrize("name", ["", "x" * 201, "Bad\nName"])
+@pytest.mark.parametrize("name", ["", "x" * 201, "Bad\nName", "nul\0name"])
 def test_invalid_app_name_is_rejected_before_native_input(name: str) -> None:
     with pytest.raises(ValueError):
         server.open_app(name)
+
+
+def test_arbitrary_leading_dash_text_is_preserved_for_native_argv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls = _install_fake_native(monkeypatch, tmp_path)
+    server.find_text("--query")
+    server.type_text("--text")
+    server.open_app("--name")
+    ocr = [call for call in calls if call[0] == "ocr" and "--query" in call][-1]
+    typed = next(call for call in calls if call[0] == "type")
+    opened = next(call for call in calls if call[0] == "open-app")
+    assert ocr[ocr.index("--query") + 1] == "--query"
+    assert typed[typed.index("--text") + 1] == "--text"
+    assert opened[opened.index("--name") + 1] == "--name"
 
 
 def test_two_hundred_concurrent_captures_leave_no_temp_files(

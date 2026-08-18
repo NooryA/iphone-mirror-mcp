@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import string
@@ -8,18 +9,18 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from mcp.server.mcpserver import Image, MCPServer
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
-from iphone_mirror_mcp.ctl import run_ctl, titlebar_pt
-from iphone_mirror_mcp.geometry import Rect, assert_inside_window, content_rect, normalized_to_global
+from iphone_mirror_mcp.ctl import run_ctl
 from iphone_mirror_mcp.screen import (
     annotate_screenshot,
     blocked_reason_from_ocr,
     find_pixels,
     visual_hash_distance,
+    visual_signature_distance,
 )
 
 mcp = MCPServer(
@@ -48,6 +49,9 @@ MAX_TEXT_LENGTH = 4_000
 MAX_SCROLL_DELTA = 120
 MAX_SCROLL_TICKS = 40
 MAX_VISUAL_HASH_DISTANCE = 8
+MAX_VISUAL_SIGNATURE_DISTANCE = 6.0
+
+ImageToolResult = Annotated[CallToolResult, dict[str, Any]]
 
 READ_ONLY_TOOL = ToolAnnotations(
     readOnlyHint=True,
@@ -61,10 +65,6 @@ INPUT_TOOL = ToolAnnotations(
     idempotentHint=False,
     openWorldHint=True,
 )
-
-
-class MirrorStateError(RuntimeError):
-    """Raised when a safety precondition blocks an interaction."""
 
 
 def _bounded_int(value: int, *, name: str, minimum: int, maximum: int) -> int:
@@ -103,42 +103,6 @@ def _validate_expected_sha256(expected_sha256: str | None) -> str | None:
     return value
 
 
-def _validate_visual_hash(visual_hash: str | None) -> str | None:
-    if visual_hash is None:
-        return None
-    value = visual_hash.strip().lower()
-    if len(value) != 16 or any(character not in string.hexdigits for character in value):
-        raise ValueError("visual hash must be a 16-character hexadecimal difference hash")
-    return value
-
-
-def _window_rect(status: dict[str, Any]) -> Rect:
-    return Rect(
-        x=float(status["x"]),
-        y=float(status["y"]),
-        width=float(status["width"]),
-        height=float(status["height"]),
-    )
-
-
-def _content_rect(status: dict[str, Any]) -> Rect:
-    if all(key in status for key in ("contentX", "contentY", "contentWidth", "contentHeight")):
-        return Rect(
-            x=float(status["contentX"]),
-            y=float(status["contentY"]),
-            width=float(status["contentWidth"]),
-            height=float(status["contentHeight"]),
-        )
-    return content_rect(_window_rect(status), titlebar=titlebar_pt())
-
-
-def _map_point(nx: float, ny: float, status: dict[str, Any]) -> tuple[float, float]:
-    window = _window_rect(status)
-    px, py = normalized_to_global(nx, ny, _content_rect(status))
-    assert_inside_window(px, py, window)
-    return px, py
-
-
 @contextmanager
 def _capture_file() -> Iterator[tuple[dict[str, Any], str]]:
     """Capture to a short-lived file and always remove it after the tool result is materialized."""
@@ -156,10 +120,30 @@ def _capture_file() -> Iterator[tuple[dict[str, Any], str]]:
             pass
 
 
-def _image_payload(result: dict[str, Any], path: str) -> list[Any]:
+@contextmanager
+def _output_file() -> Iterator[str]:
+    fd, path = tempfile.mkstemp(prefix="iphone-mirror-", suffix=".png")
+    os.close(fd)
+    try:
+        yield path
+    finally:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+def _image_payload(result: dict[str, Any], path: str) -> CallToolResult:
     if "interactionBlocked" not in result:
         _annotate_interaction_state(result, path)
-    return [result, Image(data=Path(path).read_bytes(), format="png")]
+    metadata = dict(result)
+    return CallToolResult(
+        content=[
+            TextContent(type="text", text=json.dumps(metadata, sort_keys=True)),
+            Image(data=Path(path).read_bytes(), format="png").to_image_content(),
+        ],
+        structuredContent=metadata,
+    )
 
 
 def _annotate_interaction_state(screen: dict[str, Any], path: str) -> str | None:
@@ -174,42 +158,11 @@ def _annotate_interaction_state(screen: dict[str, Any], path: str) -> str | None
     return blocked_reason
 
 
-def _guard_interaction(
-    expected_sha256: str | None = None,
-    *,
-    expected_visual_hash: str | None = None,
-) -> dict[str, Any]:
-    expected = _validate_expected_sha256(expected_sha256)
-    expected_visual = _validate_visual_hash(expected_visual_hash)
-    with _capture_file() as (screen, path):
-        actual = str(screen.get("sha256") or "")
-        actual_visual = str(screen.get("visualHash") or "")
-        blocked_reason = _annotate_interaction_state(screen, path)
-        if blocked_reason is not None:
-            raise MirrorStateError(f"interaction blocked by iPhone Mirroring host state: {blocked_reason}")
-        if expected is not None and actual != expected:
-            raise MirrorStateError(
-                f"interaction blocked: screen changed (expected {expected}, current {actual})"
-            )
-        if expected_visual is not None:
-            distance = visual_hash_distance(expected_visual, actual_visual)
-            if distance > MAX_VISUAL_HASH_DISTANCE:
-                raise MirrorStateError(
-                    "interaction blocked: screen changed visually "
-                    f"(distance {distance}, allowed {MAX_VISUAL_HASH_DISTANCE})"
-                )
-        return dict(screen)
-
-
-def _attach_preflight(result: dict[str, Any], preflight: dict[str, Any]) -> dict[str, Any]:
-    result["preflightSha256"] = preflight.get("sha256")
-    return result
-
-
 def _attach_screen_state(result: dict[str, Any], screen: dict[str, Any]) -> dict[str, Any]:
     for key in (
         "sha256",
         "visualHash",
+        "visualSignature",
         "iphoneInUse",
         "iphoneInUseHeuristic",
         "interactionBlocked",
@@ -222,6 +175,18 @@ def _attach_screen_state(result: dict[str, Any], screen: dict[str, Any]) -> dict
 def _expected_args(expected_sha256: str | None) -> tuple[str, ...]:
     expected = _validate_expected_sha256(expected_sha256)
     return ("--expected-sha256", expected) if expected is not None else ()
+
+
+def _visual_changed(
+    baseline_hash: str,
+    current_hash: str,
+    baseline_signature: str,
+    current_signature: str,
+) -> tuple[bool, int, float]:
+    hash_distance = visual_hash_distance(baseline_hash, current_hash)
+    signature_distance = visual_signature_distance(baseline_signature, current_signature)
+    changed = hash_distance > MAX_VISUAL_HASH_DISTANCE or signature_distance > MAX_VISUAL_SIGNATURE_DISTANCE
+    return changed, hash_distance, signature_distance
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
@@ -237,7 +202,7 @@ def mirror_doctor() -> dict[str, Any]:
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
-def mirror_screenshot() -> list[Any]:
+def mirror_screenshot() -> ImageToolResult:
     """Capture phone content. The result includes dimensions, sha256, and iphoneInUse."""
     with _capture_file() as (result, path):
         return _image_payload(result, path)
@@ -260,25 +225,19 @@ def _tap(
     mode: Mode,
     *,
     expected_sha256: str | None = None,
-    expected_visual_hash: str | None = None,
 ) -> dict[str, Any]:
-    preflight = _guard_interaction(
-        expected_sha256,
-        expected_visual_hash=expected_visual_hash,
-    )
-    status = run_ctl("status")
-    px, py = _map_point(x, y, status)
-    result = run_ctl(
-        "tap",
+    nx = _bounded_number(x, name="x", minimum=0, maximum=1)
+    ny = _bounded_number(y, name="y", minimum=0, maximum=1)
+    return run_ctl(
+        "tap-normalized",
         "--x",
-        str(px),
+        str(nx),
         "--y",
-        str(py),
+        str(ny),
         "--mode",
         mode,
         *_expected_args(expected_sha256),
     )
-    return _attach_preflight(result, preflight)
 
 
 @mcp.tool(annotations=INPUT_TOOL)
@@ -288,7 +247,7 @@ def tap_and_see(
     mode: Mode = "skylight",
     settle_ms: int = 300,
     expected_sha256: str | None = None,
-) -> list[Any]:
+) -> ImageToolResult:
     """Safely tap, wait up to 10 seconds, then return the resulting screenshot."""
     return _tap_and_see(
         x,
@@ -306,20 +265,33 @@ def _tap_and_see(
     settle_ms: int,
     *,
     expected_sha256: str | None = None,
-    expected_visual_hash: str | None = None,
-) -> list[Any]:
+    expected_image_path: str | None = None,
+    ocr_metadata: dict[str, Any] | None = None,
+) -> CallToolResult:
     settle = _bounded_int(settle_ms, name="settle_ms", minimum=0, maximum=MAX_SETTLE_MS)
-    tapped = _tap(
-        x,
-        y,
-        mode,
-        expected_sha256=expected_sha256,
-        expected_visual_hash=expected_visual_hash,
-    )
-    time.sleep(settle / 1000.0)
-    with _capture_file() as (result, path):
-        result["tap"] = tapped
-        result["settleMs"] = settle
+    nx = _bounded_number(x, name="x", minimum=0, maximum=1)
+    ny = _bounded_number(y, name="y", minimum=0, maximum=1)
+    expected_image_args = ("--expected-image", expected_image_path) if expected_image_path else ()
+    with _output_file() as path:
+        result = run_ctl(
+            "tap-and-capture",
+            "--x",
+            str(nx),
+            "--y",
+            str(ny),
+            "--mode",
+            mode,
+            "--settle-ms",
+            str(settle),
+            "--out",
+            path,
+            *_expected_args(expected_sha256),
+            *expected_image_args,
+        )
+        result.pop("path", None)
+        annotate_screenshot(result, path)
+        if ocr_metadata is not None:
+            result["ocr"] = ocr_metadata
         return _image_payload(result, path)
 
 
@@ -335,31 +307,30 @@ def swipe(
 ) -> dict[str, Any]:
     """Compatibility endpoint that fails closed; iPhone Mirroring ignores drag swipes."""
     duration = _bounded_int(duration_ms, name="duration_ms", minimum=80, maximum=MAX_SWIPE_MS)
-    preflight = _guard_interaction(expected_sha256)
-    status = run_ctl("status")
-    a = _map_point(x1, y1, status)
-    b = _map_point(x2, y2, status)
-    result = run_ctl(
+    start_x = _bounded_number(x1, name="x1", minimum=0, maximum=1)
+    start_y = _bounded_number(y1, name="y1", minimum=0, maximum=1)
+    end_x = _bounded_number(x2, name="x2", minimum=0, maximum=1)
+    end_y = _bounded_number(y2, name="y2", minimum=0, maximum=1)
+    return run_ctl(
         "swipe",
         "--x1",
-        str(a[0]),
+        str(start_x),
         "--y1",
-        str(a[1]),
+        str(start_y),
         "--x2",
-        str(b[0]),
+        str(end_x),
         "--y2",
-        str(b[1]),
+        str(end_y),
         "--duration-ms",
         str(duration),
         "--mode",
         mode,
         *_expected_args(expected_sha256),
     )
-    return _attach_preflight(result, preflight)
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL)
-def wait_for_change(timeout_ms: int = 8_000, interval_ms: int = 400) -> list[Any]:
+def wait_for_change(timeout_ms: int = 8_000, interval_ms: int = 400) -> ImageToolResult:
     """Poll until the perceptual screen hash changes materially or a bounded timeout expires."""
     timeout = _bounded_int(timeout_ms, name="timeout_ms", minimum=0, maximum=MAX_WAIT_MS)
     interval = _bounded_int(interval_ms, name="interval_ms", minimum=50, maximum=5_000)
@@ -367,10 +338,12 @@ def wait_for_change(timeout_ms: int = 8_000, interval_ms: int = 400) -> list[Any
         _annotate_interaction_state(baseline, baseline_path)
         baseline_hash = str(baseline.get("sha256") or "")
         baseline_visual_hash = str(baseline.get("visualHash") or "")
+        baseline_visual_signature = str(baseline.get("visualSignature") or "")
         if baseline.get("interactionBlocked") or timeout == 0:
             baseline["changed"] = False
             baseline["sha256Changed"] = False
             baseline["visualHashDistance"] = 0
+            baseline["visualSignatureDistance"] = 0.0
             baseline["timedOut"] = timeout == 0 and not baseline.get("interactionBlocked")
             baseline["elapsedMs"] = 0
             return _image_payload(baseline, baseline_path)
@@ -384,15 +357,17 @@ def wait_for_change(timeout_ms: int = 8_000, interval_ms: int = 400) -> list[Any
             _annotate_interaction_state(result, path)
             elapsed_ms = int((time.monotonic() - started) * 1_000)
             sha256_changed = str(result.get("sha256") or "") != baseline_hash
-            distance = visual_hash_distance(
+            changed, hash_distance, signature_distance = _visual_changed(
                 baseline_visual_hash,
                 str(result.get("visualHash") or ""),
+                baseline_visual_signature,
+                str(result.get("visualSignature") or ""),
             )
-            changed = distance > MAX_VISUAL_HASH_DISTANCE
             if result.get("interactionBlocked") or changed or elapsed_ms >= timeout:
                 result["changed"] = changed
                 result["sha256Changed"] = sha256_changed
-                result["visualHashDistance"] = distance
+                result["visualHashDistance"] = hash_distance
+                result["visualSignatureDistance"] = signature_distance
                 result["timedOut"] = not changed and not result.get("interactionBlocked")
                 result["elapsedMs"] = elapsed_ms
                 return _image_payload(result, path)
@@ -471,32 +446,55 @@ def find_text(
     limit: int = 8,
 ) -> dict[str, Any]:
     """Screenshot and use local Vision OCR to locate a visible label."""
+    query, region, cap = _validated_text_search(query, x0, y0, x1, y1, limit)
+    with _capture_file() as (result, path):
+        _annotate_interaction_state(result, path)
+        hit = _find_text_in_capture(query, region, cap, path)
+    return _attach_screen_state(hit, result)
+
+
+def _validated_text_search(
+    query: str,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    limit: int,
+) -> tuple[str, tuple[float, float, float, float], int]:
     if not query.strip():
         raise ValueError("query must not be empty")
     if len(query) > 500:
         raise ValueError("query must be at most 500 characters")
+    if "\0" in query:
+        raise ValueError("query must not contain NUL characters")
     region = _validate_region(x0, y0, x1, y1)
     cap = _bounded_int(limit, name="limit", minimum=1, maximum=32)
-    with _capture_file() as (result, path):
-        _annotate_interaction_state(result, path)
-        hit = run_ctl(
-            "ocr",
-            "--image",
-            path,
-            "--query",
-            query,
-            "--x0",
-            str(region[0]),
-            "--y0",
-            str(region[1]),
-            "--x1",
-            str(region[2]),
-            "--y1",
-            str(region[3]),
-            "--limit",
-            str(cap),
-        )
-    return _attach_screen_state(hit, result)
+    return query, region, cap
+
+
+def _find_text_in_capture(
+    query: str,
+    region: tuple[float, float, float, float],
+    limit: int,
+    path: str,
+) -> dict[str, Any]:
+    return run_ctl(
+        "ocr",
+        "--image",
+        path,
+        "--query",
+        query,
+        "--x0",
+        str(region[0]),
+        "--y0",
+        str(region[1]),
+        "--x1",
+        str(region[2]),
+        "--y1",
+        str(region[3]),
+        "--limit",
+        str(limit),
+    )
 
 
 @mcp.tool(annotations=INPUT_TOOL)
@@ -508,11 +506,17 @@ def tap_label(
     y0: float = 0.0,
     x1: float = 1.0,
     y1: float = 1.0,
-) -> list[Any]:
+) -> ImageToolResult:
     """OCR, verify that the observed frame is still current, tap the label, and screenshot."""
-    hit = find_text(query, x0=x0, y0=y0, x1=x1, y1=y1, limit=8)
-    if not hit.get("found") or hit.get("cx") is None or hit.get("cy") is None:
-        with _capture_file() as (result, path):
+    query, region, cap = _validated_text_search(query, x0, y0, x1, y1, 8)
+    with _capture_file() as (source, source_path):
+        _annotate_interaction_state(source, source_path)
+        hit = _attach_screen_state(
+            _find_text_in_capture(query, region, cap, source_path),
+            source,
+        )
+        if not hit.get("found") or hit.get("cx") is None or hit.get("cy") is None:
+            result = dict(source)
             result["tap"] = {
                 "ok": False,
                 "error": "label not found",
@@ -520,23 +524,21 @@ def tap_label(
                 "matches": hit.get("matches") or [],
             }
             result["ocr"] = hit
-            return _image_payload(result, path)
-    seen = _tap_and_see(
-        float(hit["cx"]),
-        float(hit["cy"]),
-        mode=mode,
-        settle_ms=settle_ms,
-        expected_visual_hash=str(hit["visualHash"]),
-    )
-    if seen and isinstance(seen[0], dict):
-        seen[0]["ocr"] = {
-            "query": query,
-            "text": hit.get("text"),
-            "cx": hit.get("cx"),
-            "cy": hit.get("cy"),
-            "confidence": hit.get("confidence"),
-        }
-    return seen
+            return _image_payload(result, source_path)
+        return _tap_and_see(
+            float(hit["cx"]),
+            float(hit["cy"]),
+            mode=mode,
+            settle_ms=settle_ms,
+            expected_image_path=source_path,
+            ocr_metadata={
+                "query": query,
+                "text": hit.get("text"),
+                "cx": hit.get("cx"),
+                "cy": hit.get("cy"),
+                "confidence": hit.get("confidence"),
+            },
+        )
 
 
 @mcp.tool(annotations=INPUT_TOOL)
@@ -550,22 +552,20 @@ def scroll(
     """HID scroll-wheel over the phone after validating pointer placement and screen state."""
     wheel = _bounded_int(delta, name="delta", minimum=-MAX_SCROLL_DELTA, maximum=MAX_SCROLL_DELTA)
     count = _bounded_int(ticks, name="ticks", minimum=1, maximum=MAX_SCROLL_TICKS)
-    preflight = _guard_interaction(expected_sha256)
-    status = run_ctl("status")
-    px, py = _map_point(x, y, status)
-    result = run_ctl(
-        "scroll",
+    nx = _bounded_number(x, name="x", minimum=0, maximum=1)
+    ny = _bounded_number(y, name="y", minimum=0, maximum=1)
+    return run_ctl(
+        "scroll-normalized",
         "--x",
-        str(px),
+        str(nx),
         "--y",
-        str(py),
+        str(ny),
         "--delta",
         str(wheel),
         "--ticks",
         str(count),
         *_expected_args(expected_sha256),
     )
-    return _attach_preflight(result, preflight)
 
 
 @mcp.tool(annotations=INPUT_TOOL)
@@ -581,11 +581,9 @@ def type_text(
         raise ValueError(f"text must be at most {MAX_TEXT_LENGTH} characters")
     if "\n" in text or "\r" in text:
         raise ValueError("text must be a single line; named Return events are not delivered to iOS")
-    preflight = _guard_interaction(expected_sha256)
-    return _attach_preflight(
-        run_ctl("type", "--text", text, "--mode", mode, *_expected_args(expected_sha256)),
-        preflight,
-    )
+    if "\0" in text:
+        raise ValueError("text must not contain NUL characters")
+    return run_ctl("type", "--text", text, "--mode", mode, *_expected_args(expected_sha256))
 
 
 @mcp.tool(annotations=INPUT_TOOL)
@@ -595,11 +593,7 @@ def press_key(
     expected_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Compatibility endpoint that fails closed; named key events do not reach iOS."""
-    preflight = _guard_interaction(expected_sha256)
-    return _attach_preflight(
-        run_ctl("key", "--name", name, "--mode", mode, *_expected_args(expected_sha256)),
-        preflight,
-    )
+    return run_ctl("key", "--name", name, "--mode", mode, *_expected_args(expected_sha256))
 
 
 @mcp.tool(annotations=INPUT_TOOL)
@@ -617,24 +611,18 @@ def open_app(name: str, expected_sha256: str | None = None) -> dict[str, Any]:
     app_name = name.strip()
     if not app_name or len(app_name) > 200 or "\n" in app_name or "\r" in app_name:
         raise ValueError("name must be 1-200 characters on one line")
-    preflight = _guard_interaction(expected_sha256)
-    return _attach_preflight(
-        run_ctl(
-            "open-app",
-            "--name",
-            app_name,
-            *_expected_args(expected_sha256),
-        ),
-        preflight,
+    if "\0" in app_name:
+        raise ValueError("name must not contain NUL characters")
+    return run_ctl(
+        "open-app",
+        "--name",
+        app_name,
+        *_expected_args(expected_sha256),
     )
 
 
 def _menu_action(action: str, expected_sha256: str | None) -> dict[str, Any]:
-    preflight = _guard_interaction(expected_sha256)
-    return _attach_preflight(
-        run_ctl("menu", "--action", action, *_expected_args(expected_sha256)),
-        preflight,
-    )
+    return run_ctl("menu", "--action", action, *_expected_args(expected_sha256))
 
 
 @mcp.tool(annotations=INPUT_TOOL)

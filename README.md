@@ -17,7 +17,7 @@ iPhone Mirroring shows a live video of the phone. The iOS UI is **not** in the M
 Taps default to `skylight`: the backwards-compatible mode name for an orange overlay plus a short [cliclick](https://github.com/BlueM/cliclick) move/click/restore sequence. `hid` uses the same proven pointer backend without the overlay. Pure synthetic events can report success without becoming an iOS touch, so supported taps, scrolling, and typing fail closed when `cliclick` is unavailable. There is no iOS accessibility tree. Home / App Switcher / Spotlight go through iPhone Mirroring’s **View** menu. List scrolling uses a HID **scroll-wheel**.
 
 ```
-Codex / Cursor / Claude  ──stdio──►  Python MCP  ──►  dist/mirror-ctl (Swift)
+Codex / Cursor / Claude  ──stdio──►  Python MCP  ──►  mirror-ctl (Swift)
                                                 ├─ ScreenCaptureKit screenshot
                                                 ├─ cliclick pointer input + overlay
                                                 └─ Accessibility View menu
@@ -42,6 +42,18 @@ uv sync
 ```
 
 `scripts/run.sh` rebuilds the Swift helper when native sources change, then starts the MCP server over stdio.
+
+### Install from a built wheel
+
+The wheel contains portable Swift source instead of an architecture-specific executable. On its first tool
+call, the installed package compiles and ad-hoc-signs `mirror-ctl` into the user cache for the current macOS
+architecture. Xcode Command Line Tools are therefore still required.
+
+```bash
+uv build
+uv tool install dist/iphone_mirror_mcp-0.2.0-py3-none-any.whl
+iphone-mirror-mcp
+```
 
 ## Connect an MCP client
 
@@ -113,7 +125,7 @@ Prefer `tap_label`, `find_text`, `scroll`, `tap_and_see`, `wait_for_change`, `fi
 
 ### `mirror_status`
 
-Whether iPhone Mirroring is running, whether its phone window is visible on the current macOS Space, content/window bounds, selected display and scale, and permission status. A hidden or off-Space window is reported as `windowVisible: false` instead of failing the tool.
+Whether iPhone Mirroring is running, whether its phone window is visible on the current macOS Space, content/window bounds, selected display and scale, and permission status. A hidden or off-Space window is reported as `windowVisible: false` instead of failing the tool. The legacy `connected` field is explicitly accompanied by `connectionEvidence: "window-geometry-only"`; use screenshot host-state fields to confirm whether interaction is actually available.
 
 ### `mirror_doctor`
 
@@ -142,15 +154,15 @@ Tap the phone screen. Prefer `tap_and_see` when you need to confirm the UI chang
 
 Default `skylight` is the backwards-compatible mode name for an overlay plus the proven `cliclick` backend. `hid` uses `cliclick` without the overlay. Both restore the Mac pointer unless real user movement is detected. `background` is retained for API compatibility but fails closed because `CGEvent.postToPid` does not deliver input to iOS.
 
-Screenshots also include a `visualHash`. `tap_label` uses this automatically so tiny live-video or status-bar changes do not cause false stale-screen failures, while actual screen transitions are still rejected. For byte-for-byte state-sensitive actions, pass the `sha256` from the screenshot used to choose the target. The native helper captures and verifies that exact frame again while holding the cross-process input lock.
+Screenshots include both a difference-based `visualHash` and a versioned absolute-color `visualSignature`. Change detection combines them so tiny live-video noise is ignored without treating black, white, or equal-luminance color screens as identical. `tap_label` keeps its OCR source frame alive and the native helper compares it with a fresh frame while holding the cross-process input lock. For byte-for-byte state-sensitive actions, pass the `sha256` from the screenshot used to choose the target.
 
 ### `tap_and_see`
 
-Tap, wait `settle_ms` (default 300), then screenshot. One round-trip instead of tap + sleep + screenshot.
+Tap, wait `settle_ms` (default 300), then screenshot. The native helper keeps one cross-process input lock across preflight, fresh normalized-coordinate mapping, the tap, settlement, and result capture.
 
 ### `wait_for_change`
 
-Poll screenshots until the perceptual `visualHash` changes materially or `timeout_ms` (default 8000). Exact PNG changes are also reported as `sha256Changed`, but harmless live-video noise does not end the wait. Use after a tap that should open a sheet instead of a blind sleep.
+Poll screenshots until either the structural `visualHash` or absolute-color `visualSignature` changes materially, or `timeout_ms` (default 8000) expires. Exact PNG changes are also reported as `sha256Changed`, but harmless live-video noise does not end the wait. Use after a tap that should open a sheet instead of a blind sleep.
 
 ### `find_color` / `find_bright`
 
@@ -213,7 +225,7 @@ Compatibility endpoints that fail closed with an actionable error. Live testing 
 
 ### `open_app`
 
-Opens an installed app via Spotlight (View menu → type name → OCR the top result → click it). It fails if an exact visible top result is not found. Prefer this over tapping a Home Screen icon.
+Opens an installed app via Spotlight. It confirms Spotlight before typing, excludes the query field from OCR result selection, clicks an exact result, and confirms a transition away from Spotlight before reporting success. The current confirmation markers recognize the English **Search**, **Siri Suggestions**, and **Show Less** labels; other macOS/iOS UI languages fail closed. Prefer this over tapping a Home Screen icon.
 
 ### `press_home` / `press_app_switcher` / `press_spotlight`
 
@@ -242,6 +254,8 @@ Optional environment variables on the MCP server entry:
 | `MIRROR_TITLEBAR_PT` | `52` | Mac title-bar height in points. Raise or lower if taps land too high or too low. |
 | `MIRROR_HID_RESTORE` | (on) | Set to `0` to leave the Mac cursor at the input target (debug). |
 | `MIRROR_CLICLICK_PATH` | auto | Absolute path to `cliclick`. Auto-detects Apple Silicon Homebrew, Intel Homebrew, and `PATH`. |
+| `MIRROR_CTL_PATH` | auto | Explicit native-helper path. Normally unnecessary. |
+| `MIRROR_NATIVE_CACHE_DIR` | user cache | Override where an installed wheel builds its architecture-specific helper. |
 
 Example:
 
@@ -268,6 +282,8 @@ Example:
 uv run ruff check .
 uv run ruff format --check .
 uv run pytest --cov=iphone_mirror_mcp
+uv build
+./scripts/smoke-wheel.sh
 uv run iphone-mirror-mcp
 ```
 
@@ -278,8 +294,9 @@ The Swift helper lives in `native/Sources/` and compiles to `dist/mirror-ctl`. T
 - Clicks outside the mirroring window are refused
 - Out-of-range and non-finite normalized coordinates are rejected, not clamped into an accidental edge click
 - Global input is serialized across helper processes and MCP clients
+- Host-state validation, fresh normalized-coordinate mapping, and supported input run in one native lock transaction
 - Optional screenshot SHA-256 preconditions block stale-screen actions
-- Perceptual visual hashes keep OCR label taps safe without failing on insignificant live-video noise
+- Absolute-color signatures plus structural hashes protect OCR label taps without missing flat/color-only transitions
 - Known host blocking screens such as **iPhone in Use**, **iCloud Signed Out**, and setup/unavailable states are detected before input
 - Pointer restoration does not overwrite user movement detected during a pointer action
 - No arbitrary shell
@@ -292,6 +309,7 @@ The Swift helper lives in `native/Sources/` and compiles to `dist/mirror-ctl`. T
 - `MIRROR_TITLEBAR_PT` defaults to 52 points because macOS does not publish the remote app's `NSWindow.contentLayoutRect`. Use `mirror_doctor` and calibrate only when screenshots or taps visibly disagree.
 - The `skylight` mode name is retained for backward compatibility, but reliable input uses `cliclick`; unsupported synthetic paths fail closed instead of claiming success.
 - A physical device must be signed in and available to iPhone Mirroring. Automated CI builds and stress-tests the controller but cannot perform a live-device gesture.
+- Spotlight UI confirmation currently recognizes English Search/Siri Suggestions/Show Less labels and fails closed for unrecognized localization.
 - This is intentionally a one-window controller. It does not provide general Mac automation or remote network access.
 
 ## License

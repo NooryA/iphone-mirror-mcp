@@ -1,35 +1,31 @@
 import Foundation
 import ApplicationServices
-import AppKit
 
 enum MenuControl {
     static func invoke(_ action: String) throws -> [String: Any] {
         let win = try WindowFinder.find()
         let title: String
-        let keyCode: CGKeyCode
         switch action {
         case "home":
             title = "Home Screen"
-            keyCode = 18
         case "app_switcher":
             title = "App Switcher"
-            keyCode = 19
         case "spotlight":
             title = "Spotlight"
-            keyCode = 20
         default:
             throw MirrorError.invalidArgs("unknown menu action: \(action)")
         }
         guard WindowFinder.accessibilityTrusted(prompt: true) else {
             throw MirrorError.permission("Accessibility permission is required for iPhone Mirroring commands")
         }
-        do {
-            try pressMenu(title: title, pid: win.pid)
-            return ["ok": true, "action": action, "menuItem": title, "backend": "accessibility-menu"]
-        } catch {
-            try pressShortcut(keyCode: keyCode, pid: win.pid)
-            return ["ok": true, "action": action, "menuItem": title, "backend": "command-shortcut"]
-        }
+        try pressMenu(title: title, pid: win.pid)
+        return [
+            "ok": true,
+            "action": action,
+            "menuItem": title,
+            "backend": "accessibility-menu",
+            "axPressConfirmed": true,
+        ]
     }
 
     private static func pressMenu(title: String, pid: pid_t) throws {
@@ -65,20 +61,5 @@ enum MenuControl {
             }
         }
         throw MirrorError.invalidArgs("menu item '\(title)' not found")
-    }
-
-    private static func pressShortcut(keyCode: CGKeyCode, pid: pid_t) throws {
-        guard let app = NSRunningApplication(processIdentifier: pid),
-              let down = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true),
-              let up = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) else {
-            throw MirrorError.invalidArgs("could not create iPhone Mirroring keyboard shortcut")
-        }
-        app.activate()
-        usleep(80_000)
-        down.flags = .maskCommand
-        up.flags = .maskCommand
-        down.post(tap: .cghidEventTap)
-        usleep(12_000)
-        up.post(tap: .cghidEventTap)
     }
 }
