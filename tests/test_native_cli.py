@@ -80,6 +80,7 @@ def test_native_self_test_covers_window_selection_and_coordinate_round_trip() ->
         "windowOnlyCaptureFallback",
         "hostBlockerDetection",
         "hostBlockerFallbackTrigger",
+        "ocrTwoPassEvidence",
     ):
         assert payload[check] is True
 

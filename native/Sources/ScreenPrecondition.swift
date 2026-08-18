@@ -123,8 +123,8 @@ enum ScreenPrecondition {
             .lowercased()
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
         return words.contains { word in
-            word.hasPrefix("connec")
-                || word.hasPrefix("paus")
+            word.hasPrefix("conn")
+                || word.hasPrefix("pau")
                 || word == "unable"
                 || word == "lock"
                 || word.hasPrefix("icloud")

@@ -305,6 +305,52 @@ enum Diagnostics {
             ["text": "General"],
             ["text": "Clock"],
         ])
+        var exactFallbackScans = 0
+        let fastExactResolution = try? MirrorCtl.resolveOCRPasses(
+            fastMatches: [["text": "Connection Paused"]],
+            query: "Missing",
+            accurateScan: {
+                exactFallbackScans += 1
+                return []
+            }
+        )
+        var exactPostActionScans = 0
+        let fastExactPostAction = try? MirrorCtl.resolveOCRPasses(
+            fastMatches: [["text": "Connection Paused"]],
+            query: nil,
+            accurateScan: {
+                exactPostActionScans += 1
+                return []
+            }
+        )
+        let distortedResolution = try? MirrorCtl.resolveOCRPasses(
+            fastMatches: [["text": "ConnxtDn Pau8ed"]],
+            query: nil,
+            accurateScan: { [["text": "Connection Paused"]] }
+        )
+        let falseAlarmResolution = try? MirrorCtl.resolveOCRPasses(
+            fastMatches: [["text": "ConnectbJn"]],
+            query: nil,
+            accurateScan: { [["text": "Settings"]] }
+        )
+        let accurateGeometryResolution = try? MirrorCtl.resolveOCRPasses(
+            fastMatches: [["text": "Other", "cx": 0.1, "cy": 0.1, "confidence": 0.9]],
+            query: "Continue",
+            accurateScan: {
+                [["text": "Continue", "cx": 0.73, "cy": 0.64, "confidence": 0.99]]
+            }
+        )
+        let ocrTwoPassEvidencePassed = exactFallbackScans == 1
+            && fastExactResolution?.blockedReason == "connection_paused"
+            && exactPostActionScans == 0
+            && fastExactPostAction?.accurateScanUsed == false
+            && fastExactPostAction?.blockedReason == "connection_paused"
+            && distortedResolution?.accurateScanUsed == true
+            && distortedResolution?.blockedReason == "connection_paused"
+            && falseAlarmResolution?.accurateScanUsed == true
+            && falseAlarmResolution?.blockedReason == nil
+            && accurateGeometryResolution?.recognitionLevel == "accurate-query-fallback"
+            && (accurateGeometryResolution?.queryResult?["cx"] as? Double) == 0.73
         return [
             "ok": selectionPassed && coordinatesPassed
                 && cliclickCoordinatesPassed && cliclickEdgesPassed && explicitTapTargetPassed
@@ -317,7 +363,7 @@ enum Diagnostics {
                 && spotlightSelectionPassed && spotlightEntryPassed
                 && normalizedRemapPassed && preparedWindowIdentityPassed
                 && timeoutIsolationPassed && windowCaptureFallbackPassed
-                && hostBlockerPassed && hostBlockerFallbackTriggerPassed,
+                && hostBlockerPassed && hostBlockerFallbackTriggerPassed && ocrTwoPassEvidencePassed,
             "windowSelection": selectionPassed,
             "coordinateRoundTrip": coordinatesPassed,
             "cliclickNegativeCoordinates": cliclickCoordinatesPassed,
@@ -344,6 +390,7 @@ enum Diagnostics {
             "windowOnlyCaptureFallback": windowCaptureFallbackPassed,
             "hostBlockerDetection": hostBlockerPassed,
             "hostBlockerFallbackTrigger": hostBlockerFallbackTriggerPassed,
+            "ocrTwoPassEvidence": ocrTwoPassEvidencePassed,
             "selectedWindowId": selected.map { Int($0.windowId) } ?? -1,
         ]
     }

@@ -13,6 +13,13 @@ struct SettlementDecision {
     let stableComparisons: Int
 }
 
+struct OCRPassResolution {
+    let blockedReason: String?
+    let queryResult: [String: Any]?
+    let recognitionLevel: String
+    let accurateScanUsed: Bool
+}
+
 struct SettlementTracker {
     static let minimumQuietMs = 160
     static let requiredStableComparisons = 1
@@ -689,12 +696,38 @@ enum MirrorCtl {
         }
 
         var result = try Capture.screenshot(to: output)
-        var matches = try OCR.scan(imageAt: output, recognitionLevel: .fast)
-        var recognitionLevel = "fast"
-        var ocr = flags["query"].map { query in
+        let resolution = try resolveOCRPasses(
+            fastMatches: OCR.scan(imageAt: output, recognitionLevel: .fast),
+            query: flags["query"],
+            x0: x0,
+            y0: y0,
+            x1: x1,
+            y1: y1,
+            limit: limit,
+            accurateScan: { try OCR.scan(imageAt: output, recognitionLevel: .accurate) }
+        )
+        if let queryResult = resolution.queryResult {
+            result["ocr"] = queryResult
+        }
+        appendInteractionState(to: &result, blockedReason: resolution.blockedReason)
+        result["analysisRecognitionLevel"] = resolution.recognitionLevel
+        return result
+    }
+
+    static func resolveOCRPasses(
+        fastMatches: [[String: Any]],
+        query: String?,
+        x0: Double = 0,
+        y0: Double = 0,
+        x1: Double = 1,
+        y1: Double = 1,
+        limit: Int = 8,
+        accurateScan: () throws -> [[String: Any]]
+    ) throws -> OCRPassResolution {
+        let fastQuery = query.map {
             OCR.search(
-                matches: matches,
-                query: query,
+                matches: fastMatches,
+                query: $0,
                 x0: x0,
                 y0: y0,
                 x1: x1,
@@ -702,50 +735,66 @@ enum MirrorCtl {
                 limit: limit
             )
         }
-        let missedQuery = ocr?["found"] as? Bool == false
-        let needsHostVerification = ScreenPrecondition.needsAccurateBlockerVerification(from: matches)
-        if missedQuery || needsHostVerification {
-            matches = try OCR.scan(imageAt: output, recognitionLevel: .accurate)
-            recognitionLevel = missedQuery ? "accurate-query-fallback" : "accurate-host-verification"
-            if let query = flags["query"] {
-                ocr = OCR.search(
-                    matches: matches,
-                    query: query,
-                    x0: x0,
-                    y0: y0,
-                    x1: x1,
-                    y1: y1,
-                    limit: limit
-                )
-            }
+        let missedQuery = fastQuery?["found"] as? Bool == false
+        let fastBlocker = ScreenPrecondition.blockedReason(from: fastMatches)
+        let unresolvedHostFragment = fastBlocker == nil
+            && ScreenPrecondition.needsAccurateBlockerVerification(from: fastMatches)
+        guard missedQuery || unresolvedHostFragment else {
+            return OCRPassResolution(
+                blockedReason: fastBlocker,
+                queryResult: fastQuery,
+                recognitionLevel: "fast",
+                accurateScanUsed: false
+            )
         }
-        if let ocr {
-            result["ocr"] = ocr
-        }
-        appendInteractionState(to: &result, matches: matches)
-        result["analysisRecognitionLevel"] = recognitionLevel
-        return result
+
+        let accurateMatches = try accurateScan()
+        let queryResult = missedQuery && query != nil
+            ? OCR.search(
+                matches: accurateMatches,
+                query: query ?? "",
+                x0: x0,
+                y0: y0,
+                x1: x1,
+                y1: y1,
+                limit: limit
+            )
+            : fastQuery
+        return OCRPassResolution(
+            blockedReason: fastBlocker ?? ScreenPrecondition.blockedReason(from: accurateMatches),
+            queryResult: queryResult,
+            recognitionLevel: missedQuery ? "accurate-query-fallback" : "accurate-host-verification",
+            accurateScanUsed: true
+        )
     }
 
     private static func appendInteractionState(
         to result: inout [String: Any],
         imageAt path: String
     ) throws {
-        var matches = try OCR.scan(imageAt: path, recognitionLevel: .fast)
-        var recognitionLevel = "fast"
-        if ScreenPrecondition.needsAccurateBlockerVerification(from: matches) {
-            matches = try OCR.scan(imageAt: path, recognitionLevel: .accurate)
-            recognitionLevel = "accurate-host-verification"
-        }
-        appendInteractionState(to: &result, matches: matches)
-        result["analysisRecognitionLevel"] = recognitionLevel
+        let resolution = try resolveOCRPasses(
+            fastMatches: OCR.scan(imageAt: path, recognitionLevel: .fast),
+            query: nil,
+            accurateScan: { try OCR.scan(imageAt: path, recognitionLevel: .accurate) }
+        )
+        appendInteractionState(to: &result, blockedReason: resolution.blockedReason)
+        result["analysisRecognitionLevel"] = resolution.recognitionLevel
     }
 
     private static func appendInteractionState(
         to result: inout [String: Any],
         matches: [[String: Any]]
     ) {
-        let blockedReason = ScreenPrecondition.blockedReason(from: matches)
+        appendInteractionState(
+            to: &result,
+            blockedReason: ScreenPrecondition.blockedReason(from: matches)
+        )
+    }
+
+    private static func appendInteractionState(
+        to result: inout [String: Any],
+        blockedReason: String?
+    ) {
         result["iphoneInUse"] = blockedReason == "iphone_in_use"
         result["interactionBlocked"] = blockedReason != nil
         result["blockedReason"] = blockedReason as Any? ?? NSNull()

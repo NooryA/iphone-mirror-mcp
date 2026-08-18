@@ -159,7 +159,7 @@ Read-only installation diagnostics: macOS and CPU architecture, displays, Access
 
 ### `mirror_screenshot`
 
-PNG of the phone screen. `width` / `height` are points; `pngWidth` / `pngHeight` are pixels. `iphoneInUse` is true only when local OCR confirms the “Lock your iPhone to connect” chrome; `iphoneInUseHeuristic` preserves the low-variance visual signal for diagnostics without blocking ordinary dark screens. Read-only classification starts with fast OCR and accurately rechecks text that resembles a known host warning. Every input action independently uses accurate OCR during its locked preflight.
+PNG of the phone screen. `width` / `height` are points; `pngWidth` / `pngHeight` are pixels. `iphoneInUse` is true only when local OCR confirms the “Lock your iPhone to connect” chrome; `iphoneInUseHeuristic` preserves the low-variance visual signal for diagnostics without blocking ordinary dark screens. Read-only classification starts with fast OCR and accurately rechecks text that resembles a known host warning. Definitive blocker evidence from either pass is preserved. Every input action independently uses accurate OCR during its locked preflight.
 
 ### `tap`
 
