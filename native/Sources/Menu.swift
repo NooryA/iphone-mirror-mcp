@@ -1,9 +1,16 @@
 import Foundation
 import ApplicationServices
+import AppKit
 
 enum MenuControl {
-    static func invoke(_ action: String) throws -> [String: Any] {
+    static func invoke(_ action: String, expectedWindowId: UInt32? = nil) throws -> [String: Any] {
         let win = try WindowFinder.find()
+        if let expectedWindowId, win.windowId != expectedWindowId {
+            throw MirrorError.invalidArgs("iPhone Mirroring window changed after preflight; no command was sent")
+        }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == win.pid else {
+            throw MirrorError.invalidArgs("iPhone Mirroring focus changed after preflight; no command was sent")
+        }
         let title: String
         switch action {
         case "home":
@@ -15,9 +22,17 @@ enum MenuControl {
         default:
             throw MirrorError.invalidArgs("unknown menu action: \(action)")
         }
-        _ = WindowFinder.accessibilityTrusted(prompt: true)
+        guard WindowFinder.accessibilityTrusted(prompt: true) else {
+            throw MirrorError.permission("Accessibility permission is required for iPhone Mirroring commands")
+        }
         try pressMenu(title: title, pid: win.pid)
-        return ["ok": true, "action": action, "menuItem": title]
+        return [
+            "ok": true,
+            "action": action,
+            "menuItem": title,
+            "backend": "accessibility-menu",
+            "axPressConfirmed": true,
+        ]
     }
 
     private static func pressMenu(title: String, pid: pid_t) throws {

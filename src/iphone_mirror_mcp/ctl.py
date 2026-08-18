@@ -1,31 +1,116 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import math
 import os
+import platform
+import signal
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
+from iphone_mirror_mcp import __version__
+
 ROOT = Path(__file__).resolve().parents[2]
 BINARY = ROOT / "dist" / "mirror-ctl"
+PACKAGE_NATIVE_ROOT = Path(__file__).resolve().parent / "native"
 
 
 class MirrorCtlError(RuntimeError):
     pass
 
 
-def run_ctl(*args: str, timeout: float = 20.0) -> dict[str, Any]:
-    if not BINARY.is_file():
-        raise MirrorCtlError(
-            f"native helper missing at {BINARY}. Run scripts/build-native.sh first."
-        )
-    proc = subprocess.run(
-        [str(BINARY), *args],
-        capture_output=True,
+def _run_process(
+    args: list[str],
+    *,
+    timeout: float,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
-        check=False,
+        env=env,
+        start_new_session=True,
     )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+
+
+def _native_binary() -> Path:
+    configured = os.environ.get("MIRROR_CTL_PATH")
+    if configured:
+        path = Path(configured).expanduser()
+        if not path.is_file():
+            raise MirrorCtlError(f"MIRROR_CTL_PATH does not point to a file: {path}")
+        return path
+    if BINARY.is_file():
+        return BINARY
+    if sys.platform != "darwin":
+        raise MirrorCtlError("iPhone Mirror MCP requires macOS and the iPhone Mirroring app")
+
+    sources = PACKAGE_NATIVE_ROOT / "Sources"
+    builder = PACKAGE_NATIVE_ROOT / "build-native.sh"
+    if not sources.is_dir() or not builder.is_file():
+        raise MirrorCtlError(
+            f"native helper missing at {BINARY}; run scripts/build-native.sh from a repository clone"
+        )
+    cache_root = Path(
+        os.environ.get(
+            "MIRROR_NATIVE_CACHE_DIR",
+            Path.home() / "Library" / "Caches" / "iphone-mirror-mcp",
+        )
+    ).expanduser()
+    target_dir = cache_root / __version__ / platform.machine()
+    target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target = target_dir / "mirror-ctl"
+    lock_path = target_dir / "build.lock"
+    with lock_path.open("a+b") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        env = os.environ.copy()
+        env["MIRROR_NATIVE_SRC"] = str(sources)
+        env["MIRROR_NATIVE_OUT"] = str(target)
+        try:
+            built = _run_process(
+                ["/bin/bash", str(builder)],
+                timeout=180,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise MirrorCtlError("native helper build timed out after 180 seconds") from exc
+        if built.returncode != 0 or not target.is_file() or not os.access(target, os.X_OK):
+            detail = (built.stderr or built.stdout or "unknown build failure").strip()
+            raise MirrorCtlError(f"could not build the native helper: {detail[:800]}")
+    return target
+
+
+def run_ctl(*args: str, timeout: float = 20.0) -> dict[str, Any]:
+    binary = _native_binary()
+    try:
+        proc = _run_process(
+            [str(binary), *args],
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise MirrorCtlError(f"mirror-ctl timed out after {timeout:g} seconds") from exc
     stdout = (proc.stdout or "").strip()
     if not stdout:
         err = (proc.stderr or "").strip() or f"exit {proc.returncode}"
@@ -42,6 +127,7 @@ def run_ctl(*args: str, timeout: float = 20.0) -> dict[str, Any]:
 def titlebar_pt() -> float:
     raw = os.environ.get("MIRROR_TITLEBAR_PT", "52")
     try:
-        return max(0.0, float(raw))
+        value = float(raw)
+        return max(0.0, value) if math.isfinite(value) else 52.0
     except ValueError:
         return 52.0

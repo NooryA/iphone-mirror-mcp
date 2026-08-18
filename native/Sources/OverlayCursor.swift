@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 
 /// Visible agent cursor. Does not receive mouse events and does not move the system pointer.
+@MainActor
 enum OverlayCursor {
     private static let size = NSSize(width: 28, height: 28)
     private static var panel: NSPanel?
