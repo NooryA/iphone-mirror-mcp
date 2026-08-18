@@ -4,6 +4,7 @@ import Foundation
 struct ScreenPreconditionState {
     let sha256: String
     let visualSignature: String
+    let structuralHash: String
     let windowId: UInt32
     let visualDistance: Double?
     let window: MirrorWindow
@@ -49,7 +50,7 @@ enum ScreenPrecondition {
         let capture = try Capture.screenshot(window: window, to: currentURL.path)
         let data = try Data(contentsOf: currentURL)
         let actual = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        let signature = try VisualComparison.signature(at: currentURL)
+        let visual = try VisualComparison.observation(at: currentURL)
         let ocrMatches = try OCR.scan(imageAt: currentURL.path)
         if let blockedReason = blockedReason(from: ocrMatches) {
             throw MirrorError.invalidArgs(
@@ -84,7 +85,8 @@ enum ScreenPrecondition {
         }
         return ScreenPreconditionState(
             sha256: actual,
-            visualSignature: signature,
+            visualSignature: visual.signature,
+            structuralHash: visual.structuralHash,
             windowId: windowId,
             visualDistance: visualDistance,
             window: window,
@@ -112,5 +114,22 @@ enum ScreenPrecondition {
             .split(whereSeparator: { $0.isWhitespace })
             .joined(separator: " ")
         return blockedMarkers.first(where: { text.contains($0.marker) })?.reason
+    }
+
+    static func needsAccurateBlockerVerification(from matches: [[String: Any]]) -> Bool {
+        let words = matches
+            .compactMap { $0["text"] as? String }
+            .joined(separator: " ")
+            .lowercased()
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        return words.contains { word in
+            word.hasPrefix("connec")
+                || word.hasPrefix("paus")
+                || word == "unable"
+                || word == "lock"
+                || word.hasPrefix("icloud")
+                || word.hasPrefix("mirror")
+                || word.hasPrefix("welcome")
+        }
     }
 }

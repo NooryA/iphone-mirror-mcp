@@ -7,15 +7,18 @@
 - Use fast Vision recognition for read-only analysis and retry accurate recognition only when a requested label is
   missed.
 - Reuse accurate preflight OCR observations for atomic label targeting instead of OCRing the same frame twice.
-- Adaptively capture after taps until a material transition is visible or the caller's maximum settlement time is
-  reached, and return explicit transition evidence.
+- Adaptively capture after taps until a material transition has a stable follow-up frame or the caller's settlement
+  budget is reached. Combine structural and absolute-color evidence, distinguish settled/time-out states, and
+  preserve `settleMs` as a response-compatibility alias.
 - Reduce each tap to one explicit absolute `cliclick` command while preserving coordinate, focus, and user-pointer
   guards.
-- Verify the real frontmost process after activation and use a bounded, fixed-bundle AppleScript fallback when
-  macOS declines the first activation request.
+- Verify the real frontmost process after activation, allow native activation a short grace period, and use a
+  bounded, fixed-bundle AppleScript fallback only when native activation remains unconfirmed.
+- Accurately recheck fast-OCR results that resemble known iPhone Mirroring host warnings before publishing the
+  read-only interaction state.
 - Decode captured images once when deriving Python-side hashes, dimensions, and host-state heuristics.
-- On the live test Mac and physical iPhone, warm median MCP screenshot time fell from about 671 ms to 295 ms and a
-  common `find_text` hit from about 1002 ms to 300 ms. Hardware, UI state, and first-run native compilation affect
+- On the live test Mac and physical iPhone, warm median MCP screenshot time fell from about 671 ms to 311 ms and a
+  common `find_text` hit from about 1002 ms to 318 ms. Hardware, UI state, and first-run native compilation affect
   absolute timings.
 
 ## 0.2.0

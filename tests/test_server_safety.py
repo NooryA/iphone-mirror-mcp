@@ -71,11 +71,23 @@ def _install_fake_native(
                         **(label_hit or {}),
                     }
             if command == "tap-and-capture":
+                settle = int(args[args.index("--settle-ms") + 1])
                 result["command"] = command
                 result["preflightSha256"] = "a" * 64
                 result["tap"] = {"ok": True}
                 result["screenChanged"] = True
                 result["visualDistanceFromPreflight"] = 12.0
+                result.update(
+                    {
+                        "settleMs": settle,
+                        "maximumSettleMs": settle,
+                        "settledMs": min(settle, 180),
+                        "settlementCaptures": 2,
+                        "screenStable": True,
+                        "settlementTimedOut": False,
+                        "settlementState": "settled",
+                    }
+                )
                 result.update({"iphoneInUse": False, "interactionBlocked": False, "blockedReason": None})
             if command == "tap-label-and-capture":
                 query = args[args.index("--query") + 1]
@@ -85,6 +97,19 @@ def _install_fake_native(
                 result["tap"] = {"ok": bool(matches)}
                 result["screenChanged"] = bool(matches)
                 result["visualDistanceFromPreflight"] = 12.0 if matches else 0.0
+                if matches:
+                    settle = int(args[args.index("--settle-ms") + 1])
+                    result.update(
+                        {
+                            "settleMs": settle,
+                            "maximumSettleMs": settle,
+                            "settledMs": min(settle, 180),
+                            "settlementCaptures": 2,
+                            "screenStable": True,
+                            "settlementTimedOut": False,
+                            "settlementState": "settled",
+                        }
+                    )
                 if not matches:
                     result["tap"].update({"error": "label not found", "query": query, "matches": []})
                 result["ocr"] = {
@@ -351,11 +376,17 @@ def test_all_public_tool_families_dispatch_with_validated_arguments(
     assert server.find_color(220, 80, 30, tolerance=0, min_pixels=1)["found"] is True
     assert server.find_bright(min_lum=200, min_pixels=1)["found"] is True
     assert server.find_text("Settings")["text"] == "Settings"
+    coordinate_tap = _metadata(server.tap_and_see(0.5, 0.5, settle_ms=321))
+    assert coordinate_tap["settleMs"] == 321
+    assert coordinate_tap["maximumSettleMs"] == 321
+    assert coordinate_tap["screenStable"] is True
     label_call_start = len(calls)
     tapped = _metadata(server.tap_label("Settings", settle_ms=0))
     assert tapped["ocr"]["text"] == "Settings"
     assert tapped["atomicLabelSelection"] is True
     assert tapped["screenChanged"] is True
+    assert tapped["settleMs"] == 0
+    assert tapped["maximumSettleMs"] == 0
     label_tap_call = [call for call in calls if call[0] == "tap-label-and-capture"][-1]
     assert label_tap_call[label_tap_call.index("--query") + 1] == "Settings"
     assert "--expected-image" not in label_tap_call

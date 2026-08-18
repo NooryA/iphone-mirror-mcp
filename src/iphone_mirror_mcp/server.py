@@ -277,7 +277,7 @@ def tap_and_see(
     x: float,
     y: float,
     mode: Mode = "skylight",
-    settle_ms: int = 1_000,
+    settle_ms: int = 1_500,
     expected_sha256: str | None = None,
 ) -> ImageToolResult:
     """Safely tap, wait up to 10 seconds, then return the resulting screenshot."""
@@ -498,7 +498,7 @@ def _validated_text_search(
 def tap_label(
     query: str,
     mode: Mode = "skylight",
-    settle_ms: int = 1_000,
+    settle_ms: int = 1_500,
     x0: float = 0.0,
     y0: float = 0.0,
     x1: float = 1.0,

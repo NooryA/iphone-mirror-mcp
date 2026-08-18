@@ -63,28 +63,59 @@ enum Diagnostics {
             currentPointer: CGPoint(x: 100, y: 100),
             target: CGPoint(x: 100, y: 100)
         ) == "iPhone Mirroring is no longer frontmost"
-        var syntheticInputCalls = 0
-        let activationRejected = !Input.awaitFrontmost(
+        var rejectedNativeCalls = 0
+        var rejectedFallbackCalls = 0
+        let activationRejected = !Input.confirmFrontmostActivation(
             pid: pid,
-            attempts: 3,
-            activate: { true },
+            nativeGraceAttempts: 2,
+            fallbackAttempts: 2,
+            nativeActivate: {
+                rejectedNativeCalls += 1
+                return false
+            },
+            fallbackActivate: {
+                rejectedFallbackCalls += 1
+                return false
+            },
             frontmostPID: { pid + 1 },
             pause: {}
         )
-        if !activationRejected { syntheticInputCalls += 1 }
-        let activationGatePassed = activationRejected && syntheticInputCalls == 0
-        var activationRequests = 0
-        let transientActivationAccepted = Input.awaitFrontmost(
+        let activationGatePassed = activationRejected
+            && rejectedNativeCalls == 1 && rejectedFallbackCalls == 1
+        var nativePhase = 0
+        var nativeFallbackCalls = 0
+        let nativeActivationAccepted = Input.confirmFrontmostActivation(
             pid: pid,
-            attempts: 14,
-            activate: {
-                activationRequests += 1
-                return false
+            nativeGraceAttempts: 2,
+            fallbackAttempts: 2,
+            nativeActivate: {
+                nativePhase = 1
+                return true
             },
-            frontmostPID: { activationRequests >= 2 ? pid : pid + 1 },
+            fallbackActivate: {
+                nativeFallbackCalls += 1
+                return true
+            },
+            frontmostPID: { nativePhase == 1 ? pid : pid + 1 },
             pause: {}
         )
-        let activationRetryPassed = transientActivationAccepted && activationRequests == 2
+        let nativeActivationGracePassed = nativeActivationAccepted && nativeFallbackCalls == 0
+        var fallbackPhase = 0
+        var fallbackCalls = 0
+        let fallbackActivationAccepted = Input.confirmFrontmostActivation(
+            pid: pid,
+            nativeGraceAttempts: 2,
+            fallbackAttempts: 2,
+            nativeActivate: { false },
+            fallbackActivate: {
+                fallbackCalls += 1
+                fallbackPhase = 1
+                return true
+            },
+            frontmostPID: { fallbackPhase == 1 ? pid : pid + 1 },
+            pause: {}
+        )
+        let activationRetryPassed = fallbackActivationAccepted && fallbackCalls == 1
         let activationScriptScopePassed = Input.activationScriptArguments() == [
             "-e",
             "tell application id \"com.apple.ScreenContinuity\" to activate",
@@ -113,19 +144,71 @@ enum Diagnostics {
         let ocrObservationReusePassed = reusedOCR["found"] as? Bool == true
             && reusedOCR["text"] as? String == "Continue"
             && reusedOCR["matches"] as? [[String: Any]] != nil
-        let adaptiveSettlementPassed = !MirrorCtl.shouldFinishSettlement(
-            visualDistance: 0,
-            elapsedMs: 200,
-            maximumSettleMs: 1_000
-        ) && MirrorCtl.shouldFinishSettlement(
-            visualDistance: VisualComparison.materialDifferenceThreshold + 0.1,
-            elapsedMs: 200,
-            maximumSettleMs: 1_000
-        ) && MirrorCtl.shouldFinishSettlement(
-            visualDistance: 0,
-            elapsedMs: 1_000,
+        func solidSignature(_ rgb: String) -> String {
+            "rgb16:" + String(repeating: rgb, count: VisualComparison.sampleSize * VisualComparison.sampleSize)
+        }
+        let baselineObservation = VisualObservation(
+            signature: solidSignature("000000"),
+            structuralHash: "0000000000000000"
+        )
+        let transientObservation = VisualObservation(
+            signature: solidSignature("ffffff"),
+            structuralHash: "ffffffffffffffff"
+        )
+        let finalObservation = VisualObservation(
+            signature: solidSignature("ff0000"),
+            structuralHash: "aaaaaaaaaaaaaaaa"
+        )
+        let animatedObservation = VisualObservation(
+            signature: solidSignature("0000ff"),
+            structuralHash: "5555555555555555"
+        )
+        var transitionTracker = SettlementTracker(
+            preflight: baselineObservation,
             maximumSettleMs: 1_000
         )
+        let transientDecision = try? transitionTracker.observe(transientObservation, elapsedMs: 100)
+        let movingDecision = try? transitionTracker.observe(finalObservation, elapsedMs: 260)
+        let settledDecision = try? transitionTracker.observe(finalObservation, elapsedMs: 450)
+
+        var delayedTracker = SettlementTracker(preflight: baselineObservation, maximumSettleMs: 1_200)
+        let delayedInitial = try? delayedTracker.observe(baselineObservation, elapsedMs: 200)
+        let delayedChange = try? delayedTracker.observe(finalObservation, elapsedMs: 700)
+        let delayedSettled = try? delayedTracker.observe(finalObservation, elapsedMs: 900)
+
+        var localizedBytes = [UInt8](repeating: 0, count: 16 * 16 * 3)
+        localizedBytes[0] = 255
+        localizedBytes[1] = 255
+        localizedBytes[2] = 255
+        let localizedObservation = VisualObservation(
+            signature: "rgb16:" + localizedBytes.map { String(format: "%02x", $0) }.joined(),
+            structuralHash: "000000000000ffff"
+        )
+        var localizedTracker = SettlementTracker(preflight: baselineObservation, maximumSettleMs: 1_000)
+        let localizedDecision = try? localizedTracker.observe(localizedObservation, elapsedMs: 100)
+
+        var unchangedTracker = SettlementTracker(preflight: baselineObservation, maximumSettleMs: 300)
+        let unchangedDecision = try? unchangedTracker.observe(baselineObservation, elapsedMs: 300)
+
+        var animatedTracker = SettlementTracker(preflight: baselineObservation, maximumSettleMs: 500)
+        _ = try? animatedTracker.observe(transientObservation, elapsedMs: 100)
+        _ = try? animatedTracker.observe(finalObservation, elapsedMs: 300)
+        let animatedDecision = try? animatedTracker.observe(animatedObservation, elapsedMs: 500)
+
+        let adaptiveSettlementPassed = transientDecision?.shouldFinish == false
+            && movingDecision?.shouldFinish == false
+            && settledDecision?.screenStable == true
+            && settledDecision?.state == "settled"
+            && delayedInitial?.transitionObserved == false
+            && delayedChange?.screenStable == false
+            && delayedSettled?.screenStable == true
+            && localizedDecision?.transitionObserved == true
+            && (localizedDecision?.visualDistanceFromPreflight ?? 10) < 2
+            && localizedDecision?.structuralHashDistanceFromPreflight == 16
+            && unchangedDecision?.state == "no-change-timeout"
+            && unchangedDecision?.screenChanged == false
+            && animatedDecision?.state == "changed-timeout"
+            && animatedDecision?.screenStable == false
         let parserPassed: Bool
         do {
             let parsed = try MirrorCtl.parseFlags(
@@ -143,13 +226,25 @@ enum Diagnostics {
         } catch {
             parserRejectsInvalid = true
         }
-        let blackSignature = "rgb16:" + String(repeating: "00", count: 16 * 16 * 3)
-        let whiteSignature = "rgb16:" + String(repeating: "ff", count: 16 * 16 * 3)
-        let redSignature = "rgb16:" + String(repeating: "ff0000", count: 16 * 16)
-        let blueSignature = "rgb16:" + String(repeating: "0000ff", count: 16 * 16)
+        let blackSignature = solidSignature("000000")
+        let whiteSignature = solidSignature("ffffff")
+        let redSignature = solidSignature("ff0000")
+        let blueSignature = solidSignature("0000ff")
+        var noiseBytes = [UInt8](repeating: 0, count: 16 * 16 * 3)
+        noiseBytes[0] = 1
+        let noiseObservation = VisualObservation(
+            signature: "rgb16:" + noiseBytes.map { String(format: "%02x", $0) }.joined(),
+            structuralHash: "0000000000000001"
+        )
         let visualComparisonPassed = (try? VisualComparison.distance(blackSignature, whiteSignature)) == 255
             && ((try? VisualComparison.distance(redSignature, blueSignature)) ?? 0)
                 > VisualComparison.materialDifferenceThreshold
+            && (try? VisualComparison.structuralDistance(
+                baselineObservation.structuralHash,
+                localizedObservation.structuralHash
+            )) == 16
+            && (try? VisualComparison.materiallyDifferent(baselineObservation, localizedObservation)) == true
+            && (try? VisualComparison.materiallyDifferent(baselineObservation, noiseObservation)) == false
         let spotlightMatches: [[String: Any]] = [
             ["text": "Settings", "cx": 0.5, "cy": 0.06, "confidence": 0.99],
             ["text": "Settings", "cx": 0.25, "cy": 0.24, "confidence": 0.95],
@@ -203,10 +298,18 @@ enum Diagnostics {
             ["text": "Connection Paused"],
             ["text": "Resume"],
         ]) == "connection_paused"
+        let hostBlockerFallbackTriggerPassed = ScreenPrecondition.needsAccurateBlockerVerification(from: [
+            ["text": "ConnectbJn"],
+        ]) && !ScreenPrecondition.needsAccurateBlockerVerification(from: [
+            ["text": "Settings"],
+            ["text": "General"],
+            ["text": "Clock"],
+        ])
         return [
             "ok": selectionPassed && coordinatesPassed
                 && cliclickCoordinatesPassed && cliclickEdgesPassed && explicitTapTargetPassed
-                && pointerGuardPassed && midScrollAbortPassed && activationGatePassed && activationRetryPassed
+                && pointerGuardPassed && midScrollAbortPassed && activationGatePassed
+                && nativeActivationGracePassed && activationRetryPassed
                 && activationScriptScopePassed
                 && typingChunkingPassed && dependencyPreflightPassed && ocrObservationReusePassed
                 && adaptiveSettlementPassed
@@ -214,7 +317,7 @@ enum Diagnostics {
                 && spotlightSelectionPassed && spotlightEntryPassed
                 && normalizedRemapPassed && preparedWindowIdentityPassed
                 && timeoutIsolationPassed && windowCaptureFallbackPassed
-                && hostBlockerPassed,
+                && hostBlockerPassed && hostBlockerFallbackTriggerPassed,
             "windowSelection": selectionPassed,
             "coordinateRoundTrip": coordinatesPassed,
             "cliclickNegativeCoordinates": cliclickCoordinatesPassed,
@@ -223,6 +326,7 @@ enum Diagnostics {
             "midActionPointerGuard": pointerGuardPassed,
             "midScrollAbort": midScrollAbortPassed,
             "activationGate": activationGatePassed,
+            "activationNativeGrace": nativeActivationGracePassed,
             "activationRetry": activationRetryPassed,
             "activationScriptScope": activationScriptScopePassed,
             "typingChunking": typingChunkingPassed,
@@ -239,6 +343,7 @@ enum Diagnostics {
             "captureTimeoutIsolation": timeoutIsolationPassed,
             "windowOnlyCaptureFallback": windowCaptureFallbackPassed,
             "hostBlockerDetection": hostBlockerPassed,
+            "hostBlockerFallbackTrigger": hostBlockerFallbackTriggerPassed,
             "selectedWindowId": selected.map { Int($0.windowId) } ?? -1,
         ]
     }

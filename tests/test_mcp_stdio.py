@@ -84,10 +84,20 @@ if command in {{"screenshot", "capture-analyze", "tap-and-capture", "tap-label-a
             if matches:
                 result["ocr"].update(matches[0])
     if command == "tap-and-capture":
+        settle = int(value("--settle-ms"))
         result["tap"] = {{"ok": True}}
         result["preflightSha256"] = "a" * 64
         result["screenChanged"] = True
         result["visualDistanceFromPreflight"] = 12.0
+        result.update({{
+            "settleMs": settle,
+            "maximumSettleMs": settle,
+            "settledMs": min(settle, 180),
+            "settlementCaptures": 2,
+            "screenStable": True,
+            "settlementTimedOut": False,
+            "settlementState": "settled",
+        }})
         result.update({{"iphoneInUse": False, "interactionBlocked": False, "blockedReason": None}})
     if command == "tap-label-and-capture":
         query = value("--query")
@@ -96,6 +106,17 @@ if command in {{"screenshot", "capture-analyze", "tap-and-capture", "tap-label-a
         result["tap"] = {{"ok": found}}
         result["screenChanged"] = found
         result["visualDistanceFromPreflight"] = 12.0 if found else 0.0
+        if found:
+            settle = int(value("--settle-ms"))
+            result.update({{
+                "settleMs": settle,
+                "maximumSettleMs": settle,
+                "settledMs": min(settle, 180),
+                "settlementCaptures": 2,
+                "screenStable": True,
+                "settlementTimedOut": False,
+                "settlementState": "settled",
+            }})
         result["ocr"] = {{"query": query, "found": found, "matches": []}}
         result.update({{"iphoneInUse": False, "interactionBlocked": False, "blockedReason": None}})
 elif command == "ocr":
@@ -142,13 +163,15 @@ def test_all_image_tool_families_serialize_over_real_stdio(
         ):
             await session.initialize()
             calls = (
-                ("mirror_screenshot", {}),
-                ("wait_for_change", {"timeout_ms": 0}),
-                ("tap_label", {"query": "Missing", "settle_ms": 0}),
-                ("tap_label", {"query": "Settings", "settle_ms": 0}),
-                ("tap_and_see", {"x": 0.5, "y": 0.5, "settle_ms": 0}),
+                ("mirror_screenshot", {}, None),
+                ("wait_for_change", {"timeout_ms": 0}, None),
+                ("tap_label", {"query": "Missing", "settle_ms": 0}, None),
+                ("tap_label", {"query": "Settings", "settle_ms": 0}, 0),
+                ("tap_label", {"query": "Settings"}, 1_500),
+                ("tap_and_see", {"x": 0.5, "y": 0.5, "settle_ms": 0}, 0),
+                ("tap_and_see", {"x": 0.5, "y": 0.5}, 1_500),
             )
-            for name, arguments in calls:
+            for name, arguments, expected_settle in calls:
                 result = await session.call_tool(name, arguments)
                 assert result.is_error is False, (name, result)
                 assert result.structured_content is not None
@@ -159,6 +182,10 @@ def test_all_image_tool_families_serialize_over_real_stdio(
                 assert json.loads(text_blocks[0].text) == result.structured_content
                 assert image_blocks[0].mime_type == "image/png"
                 assert base64.b64decode(image_blocks[0].data).startswith(b"\x89PNG")
+                if expected_settle is not None:
+                    assert result.structured_content["settleMs"] == expected_settle
+                    assert result.structured_content["maximumSettleMs"] == expected_settle
+                    assert result.structured_content["screenStable"] is True
 
             found = await session.call_tool("find_text", {"query": "--foo"})
             assert found.is_error is False

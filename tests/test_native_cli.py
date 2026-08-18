@@ -62,6 +62,7 @@ def test_native_self_test_covers_window_selection_and_coordinate_round_trip() ->
         "midActionPointerGuard",
         "midScrollAbort",
         "activationGate",
+        "activationNativeGrace",
         "activationRetry",
         "activationScriptScope",
         "typingChunking",
@@ -78,6 +79,7 @@ def test_native_self_test_covers_window_selection_and_coordinate_round_trip() ->
         "captureTimeoutIsolation",
         "windowOnlyCaptureFallback",
         "hostBlockerDetection",
+        "hostBlockerFallbackTrigger",
     ):
         assert payload[check] is True
 

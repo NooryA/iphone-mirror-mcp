@@ -1,5 +1,91 @@
 import Foundation
 
+struct SettlementDecision {
+    let shouldFinish: Bool
+    let screenChanged: Bool
+    let transitionObserved: Bool
+    let screenStable: Bool
+    let timedOut: Bool
+    let state: String
+    let changeDetectedMs: Int?
+    let visualDistanceFromPreflight: Double
+    let structuralHashDistanceFromPreflight: Int
+    let stableComparisons: Int
+}
+
+struct SettlementTracker {
+    static let minimumQuietMs = 160
+    static let requiredStableComparisons = 1
+
+    let preflight: VisualObservation
+    let maximumSettleMs: Int
+    private(set) var previous: VisualObservation
+    private(set) var transitionObserved = false
+    private(set) var changeDetectedMs: Int?
+    private(set) var lastMaterialChangeMs: Int?
+    private(set) var stableComparisons = 0
+
+    init(preflight: VisualObservation, maximumSettleMs: Int) {
+        self.preflight = preflight
+        self.maximumSettleMs = max(0, maximumSettleMs)
+        self.previous = preflight
+    }
+
+    mutating func observe(_ current: VisualObservation, elapsedMs: Int) throws -> SettlementDecision {
+        let visualDistance = try VisualComparison.distance(preflight.signature, current.signature)
+        let structuralDistance = try VisualComparison.structuralDistance(
+            preflight.structuralHash,
+            current.structuralHash
+        )
+        let changed = visualDistance > VisualComparison.materialDifferenceThreshold
+            || structuralDistance > VisualComparison.structuralDifferenceThreshold
+        let changedSincePrevious = try VisualComparison.materiallyDifferent(previous, current)
+
+        if changed {
+            if !transitionObserved {
+                transitionObserved = true
+                changeDetectedMs = elapsedMs
+            }
+            if changedSincePrevious {
+                lastMaterialChangeMs = elapsedMs
+                stableComparisons = 0
+            } else {
+                stableComparisons += 1
+            }
+        } else {
+            stableComparisons = 0
+            if changedSincePrevious { lastMaterialChangeMs = elapsedMs }
+        }
+        previous = current
+
+        let quietMs = elapsedMs - (lastMaterialChangeMs ?? elapsedMs)
+        let stable = changed
+            && stableComparisons >= Self.requiredStableComparisons
+            && quietMs >= Self.minimumQuietMs
+        let timedOut = !stable && elapsedMs >= maximumSettleMs
+        let state: String
+        if stable {
+            state = "settled"
+        } else if timedOut {
+            state = changed ? "changed-timeout" : "no-change-timeout"
+        } else {
+            state = transitionObserved ? "stabilizing" : "waiting-for-change"
+        }
+        return SettlementDecision(
+            shouldFinish: stable || timedOut,
+            screenChanged: changed,
+            transitionObserved: transitionObserved,
+            screenStable: stable,
+            timedOut: timedOut,
+            state: state,
+            changeDetectedMs: changeDetectedMs,
+            visualDistanceFromPreflight: visualDistance,
+            structuralHashDistanceFromPreflight: structuralDistance,
+            stableComparisons: stableComparisons
+        )
+    }
+}
+
 @main
 enum MirrorCtl {
     private static let inputCommands: Set<String> = [
@@ -97,7 +183,7 @@ enum MirrorCtl {
                 }
                 _ = try strictInt(
                     flags["settle-ms"],
-                    default: 1_000,
+                    default: 1_500,
                     minimum: 0,
                     maximum: 10_000,
                     name: "settle-ms"
@@ -127,7 +213,7 @@ enum MirrorCtl {
             _ = try strictInt(flags["limit"], default: 8, minimum: 1, maximum: 32, name: "limit")
             _ = try strictInt(
                 flags["settle-ms"],
-                default: 1_000,
+                default: 1_500,
                 minimum: 0,
                 maximum: 10_000,
                 name: "settle-ms"
@@ -242,7 +328,7 @@ enum MirrorCtl {
                 throw MirrorError.invalidArgs("tap-and-capture requires finite --x --y and --out")
             }
             let overlay = flags["overlay"] != "false"
-            let settle = boundedInt(flags["settle-ms"], default: 1_000, minimum: 0, maximum: 10_000)
+            let settle = boundedInt(flags["settle-ms"], default: 1_500, minimum: 0, maximum: 10_000)
             let tap = try Input.tapNormalized(
                 x: x,
                 y: y,
@@ -258,6 +344,7 @@ enum MirrorCtl {
             )
             try appendInteractionState(to: &capture, imageAt: output)
             capture["tap"] = tap
+            capture["settleMs"] = settle
             capture["maximumSettleMs"] = settle
             return capture
         case "tap-label-and-capture":
@@ -604,8 +691,8 @@ enum MirrorCtl {
         var result = try Capture.screenshot(to: output)
         var matches = try OCR.scan(imageAt: output, recognitionLevel: .fast)
         var recognitionLevel = "fast"
-        if let query = flags["query"] {
-            var ocr = OCR.search(
+        var ocr = flags["query"].map { query in
+            OCR.search(
                 matches: matches,
                 query: query,
                 x0: x0,
@@ -614,9 +701,13 @@ enum MirrorCtl {
                 y1: y1,
                 limit: limit
             )
-            if ocr["found"] as? Bool != true {
-                matches = try OCR.scan(imageAt: output, recognitionLevel: .accurate)
-                recognitionLevel = "accurate-fallback"
+        }
+        let missedQuery = ocr?["found"] as? Bool == false
+        let needsHostVerification = ScreenPrecondition.needsAccurateBlockerVerification(from: matches)
+        if missedQuery || needsHostVerification {
+            matches = try OCR.scan(imageAt: output, recognitionLevel: .accurate)
+            recognitionLevel = missedQuery ? "accurate-query-fallback" : "accurate-host-verification"
+            if let query = flags["query"] {
                 ocr = OCR.search(
                     matches: matches,
                     query: query,
@@ -627,6 +718,8 @@ enum MirrorCtl {
                     limit: limit
                 )
             }
+        }
+        if let ocr {
             result["ocr"] = ocr
         }
         appendInteractionState(to: &result, matches: matches)
@@ -638,11 +731,14 @@ enum MirrorCtl {
         to result: inout [String: Any],
         imageAt path: String
     ) throws {
-        appendInteractionState(
-            to: &result,
-            matches: try OCR.scan(imageAt: path, recognitionLevel: .fast)
-        )
-        result["analysisRecognitionLevel"] = "fast"
+        var matches = try OCR.scan(imageAt: path, recognitionLevel: .fast)
+        var recognitionLevel = "fast"
+        if ScreenPrecondition.needsAccurateBlockerVerification(from: matches) {
+            matches = try OCR.scan(imageAt: path, recognitionLevel: .accurate)
+            recognitionLevel = "accurate-host-verification"
+        }
+        appendInteractionState(to: &result, matches: matches)
+        result["analysisRecognitionLevel"] = recognitionLevel
     }
 
     private static func appendInteractionState(
@@ -663,37 +759,37 @@ enum MirrorCtl {
     ) throws -> [String: Any] {
         let started = DispatchTime.now().uptimeNanoseconds
         let maximum = max(0, maximumSettleMs)
+        var tracker = SettlementTracker(
+            preflight: VisualObservation(
+                signature: preflight.visualSignature,
+                structuralHash: preflight.structuralHash
+            ),
+            maximumSettleMs: maximum
+        )
         if maximum > 0 { usleep(useconds_t(min(80, maximum) * 1_000)) }
         var attempts = 0
         while true {
             var result = try Capture.screenshot(window: window, to: output)
             attempts += 1
-            let currentSignature = try VisualComparison.signature(at: URL(fileURLWithPath: output))
-            let distance = try VisualComparison.distance(preflight.visualSignature, currentSignature)
+            let current = try VisualComparison.observation(at: URL(fileURLWithPath: output))
             let elapsedMs = Int((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
-            let changed = distance > VisualComparison.materialDifferenceThreshold
-            if shouldFinishSettlement(
-                visualDistance: distance,
-                elapsedMs: elapsedMs,
-                maximumSettleMs: maximum
-            ) {
-                result["visualDistanceFromPreflight"] = distance
-                result["screenChanged"] = changed
+            let decision = try tracker.observe(current, elapsedMs: elapsedMs)
+            if decision.shouldFinish {
+                result["visualDistanceFromPreflight"] = decision.visualDistanceFromPreflight
+                result["structuralHashDistanceFromPreflight"] = decision.structuralHashDistanceFromPreflight
+                result["screenChanged"] = decision.screenChanged
+                result["transitionObserved"] = decision.transitionObserved
+                result["screenStable"] = decision.screenStable
+                result["settlementTimedOut"] = decision.timedOut
+                result["settlementState"] = decision.state
+                result["changeDetectedMs"] = decision.changeDetectedMs as Any? ?? NSNull()
                 result["settledMs"] = elapsedMs
                 result["settlementCaptures"] = attempts
+                result["settlementStableComparisons"] = decision.stableComparisons
                 return result
             }
             usleep(useconds_t(min(80, maximum - elapsedMs) * 1_000))
         }
-    }
-
-    static func shouldFinishSettlement(
-        visualDistance: Double,
-        elapsedMs: Int,
-        maximumSettleMs: Int
-    ) -> Bool {
-        visualDistance > VisualComparison.materialDifferenceThreshold
-            || elapsedMs >= max(0, maximumSettleMs)
     }
 
     private static func tapLabelAndCapture(
@@ -705,7 +801,7 @@ enum MirrorCtl {
         }
         let inputMode = try mode(flags["mode"], default: .skylight)
         let overlay = flags["overlay"] != "false"
-        let settle = boundedInt(flags["settle-ms"], default: 1_000, minimum: 0, maximum: 10_000)
+        let settle = boundedInt(flags["settle-ms"], default: 1_500, minimum: 0, maximum: 10_000)
         let ocr = OCR.search(
             matches: preflight.ocrMatches,
             query: query,
@@ -763,6 +859,7 @@ enum MirrorCtl {
             "cy": y,
             "confidence": ocr["confidence"] ?? NSNull(),
         ]
+        result["settleMs"] = settle
         result["maximumSettleMs"] = settle
         result["atomicLabelSelection"] = true
         return result

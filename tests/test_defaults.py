@@ -34,13 +34,13 @@ def test_tap_modes_default_to_skylight() -> None:
 
 
 def test_new_tools_have_sane_defaults() -> None:
-    assert inspect.signature(tap_and_see).parameters["settle_ms"].default == 1_000
+    assert inspect.signature(tap_and_see).parameters["settle_ms"].default == 1_500
     assert inspect.signature(wait_for_change).parameters["timeout_ms"].default == 8000
     assert inspect.signature(find_color).parameters["tolerance"].default == 40
     assert inspect.signature(find_bright).parameters["min_lum"].default == 200
     assert inspect.signature(find_text).parameters["limit"].default == 8
     assert inspect.signature(scroll).parameters["delta"].default == -12
-    assert inspect.signature(tap_label).parameters["settle_ms"].default == 1_000
+    assert inspect.signature(tap_label).parameters["settle_ms"].default == 1_500
 
 
 def test_mcp_tools_advertise_read_only_and_input_risk_hints() -> None:

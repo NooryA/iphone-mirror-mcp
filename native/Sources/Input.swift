@@ -273,9 +273,10 @@ enum Input {
               app.bundleIdentifier == WindowFinder.bundleId else {
             throw MirrorError.invalidArgs("could not resolve the iPhone Mirroring application")
         }
-        let confirmed = awaitFrontmost(
+        let confirmed = confirmFrontmostActivation(
             pid: expected.pid,
-            activate: { requestActivation(app) },
+            nativeActivate: { app.isActive || app.activate() },
+            fallbackActivate: { requestScriptActivation() },
             frontmostPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
             pause: { usleep(25_000) }
         )
@@ -289,9 +290,7 @@ enum Input {
         return refreshed
     }
 
-    private static func requestActivation(_ app: NSRunningApplication) -> Bool {
-        if app.isActive { return true }
-        _ = app.activate()
+    private static func requestScriptActivation() -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         process.arguments = activationScriptArguments()
@@ -322,19 +321,40 @@ enum Input {
         ["-e", "tell application id \"\(WindowFinder.bundleId)\" to activate"]
     }
 
-    static func awaitFrontmost(
+    static func confirmFrontmostActivation(
         pid: pid_t,
-        attempts: Int = 60,
-        activate: () -> Bool,
+        nativeGraceAttempts: Int = 8,
+        fallbackAttempts: Int = 40,
+        nativeActivate: () -> Bool,
+        fallbackActivate: () -> Bool,
+        frontmostPID: () -> pid_t?,
+        pause: () -> Void
+    ) -> Bool {
+        if frontmostPID() == pid { return true }
+        _ = nativeActivate()
+        if pollFrontmost(
+            pid: pid,
+            attempts: nativeGraceAttempts,
+            frontmostPID: frontmostPID,
+            pause: pause
+        ) { return true }
+        _ = fallbackActivate()
+        return pollFrontmost(
+            pid: pid,
+            attempts: fallbackAttempts,
+            frontmostPID: frontmostPID,
+            pause: pause
+        )
+    }
+
+    private static func pollFrontmost(
+        pid: pid_t,
+        attempts: Int,
         frontmostPID: () -> pid_t?,
         pause: () -> Void
     ) -> Bool {
         let count = max(1, attempts)
         for attempt in 0..<count {
-            if frontmostPID() == pid { return true }
-            if attempt == 0 || attempt.isMultiple(of: 12) {
-                _ = activate()
-            }
             if frontmostPID() == pid { return true }
             if attempt + 1 < count { pause() }
         }

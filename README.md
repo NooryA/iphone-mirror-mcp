@@ -30,15 +30,15 @@ and OCR passes. On the development Mac with a live physical iPhone, warm median 
 
 | Operation | 0.2.0 | 0.3.0 |
 | --- | ---: | ---: |
-| `mirror_status` | 98 ms | 93 ms |
-| `mirror_screenshot` | 671 ms | 295 ms |
-| `find_text` common hit | 1002 ms | 302 ms |
-| `tap_label` missing label (no input sent) | 1180 ms | 665 ms |
+| `mirror_status` | 98 ms | 96 ms |
+| `mirror_screenshot` | 671 ms | 311 ms |
+| `find_text` common hit | 1002 ms | 318 ms |
+| `tap_label` missing label (no input sent) | 1180 ms | 658 ms |
 
-Successful taps are normally about 1.0–1.4 seconds end to end because they still activate and verify the exact
+Successful taps were about 1.4–2.5 seconds end to end because they still activate and verify the exact
 window, accurately OCR the preflight frame, send input, and capture proof of the resulting screen. The adaptive
-settlement loop usually sees an ordinary transition in about 180–200 ms instead of always sleeping for its full
-one-second default. The first installed-wheel call is slower because it compiles and signs the native helper once.
+settlement loop returns as soon as it observes both a transition and a stable follow-up frame instead of always
+sleeping for its configured cap. The first installed-wheel call is slower because it compiles and signs the native helper once.
 Hardware, display scale, animation length, OCR content, and macOS focus state affect absolute timings.
 
 ## Prerequisites
@@ -134,6 +134,8 @@ Grant these to the **MCP client app** (Cursor, Claude, etc.) — not Terminal �
 
 1. **Accessibility** — taps, scrolling, typing, View menu
 2. **Screen Recording** — screenshots of the mirror window
+3. **Automation, only if macOS prompts** — the fixed-bundle activation fallback may request permission to activate
+   iPhone Mirroring when ordinary native activation does not become frontmost during its grace period
 
 Keep iPhone Mirroring connected while the agent runs. Quitting the mirroring window **locks the phone**.
 
@@ -157,7 +159,7 @@ Read-only installation diagnostics: macOS and CPU architecture, displays, Access
 
 ### `mirror_screenshot`
 
-PNG of the phone screen. `width` / `height` are points; `pngWidth` / `pngHeight` are pixels. `iphoneInUse` is true only when local OCR confirms the “Lock your iPhone to connect” chrome; `iphoneInUseHeuristic` preserves the low-variance visual signal for diagnostics without blocking ordinary dark screens.
+PNG of the phone screen. `width` / `height` are points; `pngWidth` / `pngHeight` are pixels. `iphoneInUse` is true only when local OCR confirms the “Lock your iPhone to connect” chrome; `iphoneInUseHeuristic` preserves the low-variance visual signal for diagnostics without blocking ordinary dark screens. Read-only classification starts with fast OCR and accurately rechecks text that resembles a known host warning. Every input action independently uses accurate OCR during its locked preflight.
 
 ### `tap`
 
@@ -178,7 +180,7 @@ Screenshots include both a difference-based `visualHash` and a versioned absolut
 
 ### `tap_and_see`
 
-Tap, adaptively wait for a material screen change for at most `settle_ms` (default 1000), then return the captured result. Most transitions finish much earlier than the maximum. The native helper keeps one cross-process input lock across preflight, fresh normalized-coordinate mapping, the tap, settlement, and result capture. Results include `screenChanged`, `visualDistanceFromPreflight`, `settledMs`, `settlementCaptures`, and `maximumSettleMs` so callers can verify the transition instead of guessing with a sleep.
+Tap, wait for a material screen change and a stable follow-up frame for up to the `settle_ms` poll budget (default 1500), then return the latest capture. An in-flight window capture is allowed to finish, so `settledMs` can finish slightly beyond that budget. Structural and absolute-color signals are both used, so localized layout changes and flat/color-only transitions are visible. The native helper keeps one cross-process input lock across preflight, fresh normalized-coordinate mapping, the tap, settlement, and result capture. Results distinguish `screenChanged`, `transitionObserved`, `screenStable`, `settlementTimedOut`, `settlementState`, `changeDetectedMs`, `settledMs`, and both visual distances. `settleMs` remains the compatibility alias for the requested cap; `maximumSettleMs` makes that meaning explicit.
 
 ### `wait_for_change`
 
